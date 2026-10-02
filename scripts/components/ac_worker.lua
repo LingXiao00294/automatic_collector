@@ -13,6 +13,8 @@ local Worker = Class(function(self, inst)
     self.action_speed = 1
     self.nextscan = 0
     self.blocked = false
+    self.farm_count = 0
+    self.farm_draining = false
     self.task = inst:DoPeriodicTask(.5, function() self:Watchdog() end)
 end)
 
@@ -28,6 +30,19 @@ function Worker:SetHome()
     self.homeplatform = self.inst:GetCurrentPlatform()
     self.homelocal = self.homeplatform ~= nil
         and Vector3(self.homeplatform.entity:WorldToLocalSpace(self.home:Get())) or nil
+    self:SyncHome()
+end
+
+-- Coordinates are local to the boat when a platform is present.
+function Worker:SyncHome()
+    local inst = self.inst
+    if inst._ac_home_valid == nil then return end
+    local home = self.homelocal or self.home
+    inst._ac_home_valid:set(home ~= nil)
+    inst._ac_home_platform:set(self.homeplatform)
+    inst._ac_home_x:set(home ~= nil and home.x or 0)
+    inst._ac_home_z:set(home ~= nil and home.z or 0)
+    inst._ac_radius:set(self.radius)
 end
 
 function Worker:IsCoolingDown(target)
@@ -85,14 +100,16 @@ function Worker:GetPickupCount(target)
 end
 
 function Worker:CanHarvest(target, kind)
+    if kind == "hammer" then return self:GetCargo() == nil end
+    if Targets.IsFarmWork(target, kind) then
+        -- Products are harvested to the ground. Only real pickup/delivery checks
+        -- capacity; unknown yields and a full matching chest cannot block a crop.
+        return not self.farm_draining and self:GetCargo() == nil
+    end
     local inventory = self.inst.components.inventory
     if inventory:GetActiveItem() ~= nil then return false end
     if self:GetCargo() == nil then
-        return Targets.HasHarvestDestination(self, target)
-    end
-    -- Giant work produces ground loot rather than adding to the current stack.
-    if kind == "hammer" or (target:HasTag("farm_plant") and target.is_oversized) then
-        return false
+        return Targets.HasHarvestDestination(self, target, kind)
     end
     local product, count = Targets.HarvestProduct(self, target, kind)
     if type(product) ~= "string" or type(count) ~= "number" or count ~= count
@@ -113,7 +130,16 @@ function Worker:CanHarvest(target, kind)
         end
     end
     -- A future capacity upgrade may start another known product group.
-    return empty and Targets.HasHarvestDestination(self, target)
+    return empty and Targets.HasHarvestDestination(self, target, kind)
+end
+
+function Worker:DropHarvestCargo()
+    local inventory = self.inst.components.inventory
+    local items = {}
+    for _, item in pairs(inventory.itemslots) do table.insert(items, item) end
+    local active = inventory:GetActiveItem()
+    if active ~= nil then table.insert(items, active) end
+    for _, item in ipairs(items) do inventory:DropItem(item, true) end
 end
 
 -- Split only this target at animation contact. Native Stackable:Get preserves
@@ -156,7 +182,15 @@ function Worker:Finish(action, success)
     if not success and not self.pending.replan and target ~= nil and target:IsValid() then
         self.cooldowns[target] = GetTime() + self.config.retry_delay
     end
-    if success and (action.action == ACTIONS.PICK or action.action == ACTIONS.HARVEST) then
+    if self.pending.farm then
+        -- Native/mod callbacks may give products directly to the collector.
+        -- Return every real item to the ground before planning the next crop.
+        self:DropHarvestCargo()
+        if success then
+            self.farm_count = self.farm_count + 1
+            if self.farm_count >= 5 then self.farm_draining = true end
+        end
+    elseif success and (action.action == ACTIONS.PICK or action.action == ACTIONS.HARVEST) then
         -- Harvest callbacks may give extra seeds or overflow. Keep deliberate
         -- transport within its slot capacity; native DropItem preserves the item.
         local inventory = self.inst.components.inventory
@@ -258,14 +292,31 @@ function Worker:GetNextAction()
     end
     local target, kind, action, cargo
     cargo = self:GetCargo()
+    local entities = Targets.GetWorkEntities(self)
+    if cargo == nil and not self.farm_draining then
+        target, kind, action = Targets.FindWork(self, "farm", entities)
+        if target == nil and self.farm_count > 0 then
+            -- Finish a short batch when no mature crop remains.
+            self.farm_draining = true
+        end
+    end
+    if target == nil and self.farm_draining then
+        target, kind, action = Targets.FindWork(self, "drain", entities)
+        if target == nil and cargo == nil then
+            -- Leave currently undeliverable drops on the ground and resume work.
+            -- Capacity and target availability are checked again on future scans.
+            self.farm_draining, self.farm_count = false, 0
+            target, kind, action = Targets.FindWork(self, "farm", entities)
+        end
+    end
+    if target == nil then
+        target, kind, action = Targets.FindWork(self, self.farm_draining and "drain" or "normal", entities)
+    end
     if cargo ~= nil then
-        target, kind, action = Targets.FindWork(self)
         if target == nil then
             target = Targets.FindContainer(self, cargo)
             kind, action = "store", ACTIONS.STORE
         end
-    else
-        target, kind, action = Targets.FindWork(self)
     end
     if target == nil then
         -- Native storage_robot's GoHomeAction drops one whole cargo stack at
@@ -290,7 +341,8 @@ function Worker:GetNextAction()
         -- Drive over the item before sinking, without changing global PICKUP.
         buffered.arrivedist = .15
     end
-    self.pending = { action = buffered, kind = kind, claimtarget = target, started = GetTime() }
+    self.pending = { action = buffered, kind = kind, claimtarget = target,
+        farm = Targets.IsFarmWork(target, kind), started = GetTime() }
     buffered:AddSuccessAction(function() self:Finish(buffered, true) end)
     buffered:AddFailAction(function() self:Finish(buffered, false) end)
     return buffered
@@ -299,6 +351,8 @@ end
 function Worker:OnPickup(owner)
     self:Cancel()
     self.home, self.homeplatform, self.homelocal = nil, nil, nil
+    self.farm_count, self.farm_draining = 0, false
+    self:SyncHome()
     local inventory = self.inst.components.inventory
     while self:GetCargo() ~= nil do
         local cargo = inventory:RemoveItem(self:GetCargo(), true)
@@ -319,13 +373,15 @@ end
 function Worker:OnDropped()
     self:Cancel()
     self:SetHome()
+    self.farm_count, self.farm_draining = 0, false
     self.cooldowns = setmetatable({}, { __mode = "k" })
     self.nextscan = GetTime() + .5
     self:SetEnabled(true)
 end
 
 function Worker:OnSave()
-    local data = { enabled = self.enabled, carryslots = self:GetCarrySlots() }
+    local data = { enabled = self.enabled, carryslots = self:GetCarrySlots(),
+        farm_count = self.farm_count, farm_draining = self.farm_draining }
     if self.home ~= nil then
         data.home = { x = self.home.x, z = self.home.z }
     end
@@ -346,10 +402,15 @@ function Worker:OnLoad(data)
     if data == nil then return end
     self:OnPreLoad(data)
     self.enabled = data.enabled ~= false
+    local count = data.farm_count
+    self.farm_count = type(count) == "number" and count == count
+        and math.max(0, math.min(5, math.floor(count))) or 0
+    self.farm_draining = data.farm_draining == true or self.farm_count >= 5
     self.inst._ac_enabled:set(self.enabled)
     if data.home ~= nil then
         self.home = Vector3(data.home.x, 0, data.home.z)
     end
+    self:SyncHome()
 end
 
 function Worker:LoadPostPass(ents, data)
@@ -357,6 +418,7 @@ function Worker:LoadPostPass(ents, data)
     if platform ~= nil and data.homelocal ~= nil then
         self.homeplatform = platform.entity
         self.homelocal = Vector3(data.homelocal.x, 0, data.homelocal.z)
+        self:SyncHome()
     end
 end
 
@@ -366,8 +428,9 @@ function Worker:OnRemoveFromEntity()
 end
 
 function Worker:GetDebugString()
-    return string.format("enabled=%s cargo=%s job=%s", tostring(self.enabled),
-        tostring(self:GetCargo() ~= nil), self.pending ~= nil and self.pending.kind or "idle")
+    return string.format("enabled=%s cargo=%s job=%s farm=%d/5 draining=%s", tostring(self.enabled),
+        tostring(self:GetCargo() ~= nil), self.pending ~= nil and self.pending.kind or "idle",
+        self.farm_count, tostring(self.farm_draining))
 end
 
 return Worker

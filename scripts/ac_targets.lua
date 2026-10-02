@@ -1,5 +1,6 @@
 local M = {}
 local API = require("ac_api")
+local Compat = require("ac_compat")
 local claims = setmetatable({}, { __mode = "k" })
 local EXCLUDE = { "INLIMBO", "FX", "NOCLICK", "DECOR", "fire", "outofreach", "ac_ignore" }
 local UNSAFE = { "irreplaceable", "catchable", "trap", "mineactive", "cursed", "spider", "heavy", "storagerobot", "automatic_collector" }
@@ -83,7 +84,7 @@ function M.Kind(worker, target)
     end
 end
 
-function M.IsContainer(worker, target)
+function M.IsDeliveryContainer(worker, target)
     if not M.IsSafe(worker, target) or target:HasAnyTag({ "companion", "portablestorage", "mermonly", "mastercookware", "ac_no_delivery" }) then
         return false
     end
@@ -91,11 +92,27 @@ function M.IsContainer(worker, target)
     if container == nil or container.readonlycontainer or not container.canbeopened
         or (container.type ~= "chest" and not target:HasTag("ac_delivery_container"))
         or target.components.stewer ~= nil or target.components.dryingrack ~= nil
-        or container:IsRestricted(worker.inst) or not container:CanOpen()
-        or container:IsOpenedByOthers(worker.inst) then
+        or container:IsRestricted(worker.inst) then
         return false
     end
     return true
+end
+
+function M.IsContainer(worker, target)
+    return M.IsDeliveryContainer(worker, target) and target.components.container:CanOpen()
+        and not target.components.container:IsOpenedByOthers(worker.inst)
+end
+
+function M.IsFarmWork(target, kind)
+    return kind ~= "pickup" and kind ~= "hammer" and (
+        target:HasTag("farm_plant") or target:HasTag("medal_fruit_tree")
+        or target.components.crop ~= nil or target.components.perennialcrop ~= nil
+        or target.components.perennialcrop2 ~= nil)
+end
+
+function M.GetWorkEntities(worker)
+    local x, y, z = worker:GetHome():Get()
+    return TheSim:FindEntities(x, y, z, worker.radius + 2, nil, EXCLUDE)
 end
 
 function M.CanReceive(worker, target, item, requiredcount)
@@ -155,6 +172,8 @@ function M.HarvestProduct(worker, target, kind)
         end
         return nil
     end
+    local info = Compat.HarvestInfo(target)
+    if info ~= nil then return info.product, info.count end
     if target:HasTag("farm_plant") and target.plant_def ~= nil then
         if target.is_oversized then return nil end
         return target:HasTag("farm_plant_killjoy") and "spoiled_food" or target.plant_def.product, 1
@@ -182,7 +201,7 @@ end
 
 -- A preflight check without spawning fake products or invoking another mod's harvest code.
 -- Exact slot filters are evaluated using the real cargo at delivery time.
-function M.HasHarvestDestination(worker, target)
+function M.HasHarvestDestination(worker, target, kind)
     local products = {}
     local pickable, crop = target.components.pickable, target.components.crop
     if pickable ~= nil and pickable.product ~= nil then
@@ -195,6 +214,12 @@ function M.HasHarvestDestination(worker, target)
     if target:HasTag("farm_plant") and target.plant_def ~= nil then
         -- Large vegetables are worked on the ground; ordinary crops include seeds.
         products = { target:HasTag("farm_plant_killjoy") and "spoiled_food" or target.plant_def.product }
+    end
+    local info = Compat.HarvestInfo(target)
+    if info ~= nil then products = info.products end
+    if kind ~= nil and kind:sub(1, 8) == "adapter:" then
+        local product = M.HarvestProduct(worker, target, kind)
+        if product ~= nil then products = { product } end
     end
     for _, chest in ipairs(M.GetContainers(worker)) do
         if M.IsContainer(worker, chest) and not worker:IsCoolingDown(chest) then
@@ -229,15 +254,18 @@ function M.HasHarvestDestination(worker, target)
     return false
 end
 
-function M.FindWork(worker)
-    local x, y, z = worker:GetHome():Get()
+function M.FindWork(worker, mode, entities)
     local best, bestkind, bestaction, bestscore
     local priority = { pickup = 0, hammer = 1, pick = 2, harvest = 2 }
     local empty = worker:GetCargo() == nil
-    for _, target in ipairs(TheSim:FindEntities(x, y, z, worker.radius + 2, nil, EXCLUDE)) do
+    for _, target in ipairs(entities or M.GetWorkEntities(worker)) do
         if M.IsAvailable(worker, target) and not worker:IsCoolingDown(target) then
             local kind, action = M.Kind(worker, target)
-            if kind ~= nil and action ~= nil then
+            local farm = kind ~= nil and M.IsFarmWork(target, kind)
+            local allowed = mode == "farm" and (farm or kind == "hammer")
+                or mode == "drain" and (kind == "pickup" or kind == "hammer")
+                or mode == "normal" and not farm or mode == nil
+            if allowed and kind ~= nil and action ~= nil then
                 local destination = kind == "pickup" and worker:GetPickupCount(target) > 0
                     or kind ~= "pickup" and worker:CanHarvest(target, kind)
                 if destination then
@@ -245,7 +273,7 @@ function M.FindWork(worker)
                     -- Prepare every available giant before starting a cargo group.
                     -- Once carrying, fill/deliver that group before starting new work.
                     if empty and (kind == "hammer" or (kind == "pick"
-                        and target:HasTag("farm_plant") and target.is_oversized)) then
+                        and Compat.IsGiantPlant(target))) then
                         rank = -1
                     end
                     local score = rank * 100000 + worker.inst:GetDistanceSqToInst(target)

@@ -73,3 +73,8 @@ hammer.distance = 1.5
 -- Public registry: other mods can register adapters without changing base components.
 -- Built-in handlers use the same component methods exposed to integrations.
 G.AUTOMATIC_COLLECTOR_API = require("ac_api")
+
+-- Insight loads at a lower priority. Register once all modmain files have run,
+-- on both clients and servers, without requiring any third-party script.
+local insight_compat = require("ac_insight")
+AddSimPostInit(function() insight_compat.Register(G, modname) end)

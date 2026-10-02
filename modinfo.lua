@@ -1,7 +1,7 @@
 name = "拾荒机 · Automatic Collector"
-description = "version: 0.4.3\n拾荒机：拾取、采摘和收获，还可以敲开巨大作物。\n右键暂停/启动。"
+description = "version: 0.5.2\n拾荒机：每采摘 5 个农作物，集中拾取和运输；巨大作物采摘后先敲开。\n产物暂无可用接收箱时留地跳过，不阻塞后续工作。\n兼容 Insight、棱镜和能力勋章。\n右键暂停/启动。"
 author = "Lingxiao00294"
-version = "0.4.3"
+version = "0.5.2"
 api_version = 10
 dst_compatible = true
 dont_starve_compatible = false
