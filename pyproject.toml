@@ -1,0 +1,19 @@
+[project]
+name = "automatic-collector-tools"
+version = "0.4.0"
+description = "DST collector asset pipeline and Lua regression tests"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["pillow>=11", "lupa>=2.6", "pytest>=8", "ruff>=0.12", "ty>=0.0.1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# LuaJIT uses handled SEH exceptions on Windows; pytest's fault handler misreports them.
+addopts = "-p no:faulthandler"

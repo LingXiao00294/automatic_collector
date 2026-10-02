@@ -1,0 +1,30 @@
+[00:00:22]: AC_SMOKE START	-400	-200	115189	
+[00:00:23]: AC_SMOKE JOB	PICKUP	twigs	
+[00:00:25]: AC_SMOKE JOB	STORE	treasurechest	
+[00:00:42]: AC_SMOKE PASS ground transport	
+[00:00:43]: AC_SMOKE JOB	PICK	grass	
+[00:00:46]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:02]: AC_SMOKE PASS native grass	
+[00:01:03]: AC_SMOKE JOB	PICK	farm_plant_carrot	
+[00:01:05]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:27]: AC_SMOKE PASS native crop	
+[00:01:28]: AC_SMOKE JOB	PICK	farm_plant_carrot	
+[00:01:30]: AC_SMOKE JOB	AC_HAMMER	carrot_oversized	
+[00:01:31]: AC_SMOKE JOB	PICKUP	carrot_seeds	
+[00:01:33]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:35]: AC_SMOKE JOB	PICKUP	carrot_seeds	
+[00:01:37]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:39]: AC_SMOKE JOB	PICKUP	carrot	
+[00:01:41]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:44]: AC_SMOKE JOB	PICKUP	carrot	
+[00:01:46]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:48]: AC_SMOKE JOB	PICKUP	carrot	
+[00:01:51]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:17]: AC_SMOKE PASS giant crop chain	
+[00:02:22]: AC_SMOKE PASS pause	
+[00:02:23]: AC_SMOKE JOB	PICKUP	cutgrass	
+[00:02:25]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:37]: AC_SMOKE PASS native save/load with cargo and pause	
+[00:02:57]: AC_SMOKE PASS full container stops new work	
+[00:03:07]: AC_SMOKE PASS capacity restored resumes work	
+[00:03:07]: AC_SMOKE SUCCESS	

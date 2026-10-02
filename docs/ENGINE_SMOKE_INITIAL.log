@@ -1,0 +1,28 @@
+[00:01:04]: AC_SMOKE START	-400	-200	115095	
+[00:01:05]: AC_SMOKE JOB	PICKUP	twigs	
+[00:01:07]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:24]: AC_SMOKE PASS ground transport	
+[00:01:26]: AC_SMOKE JOB	PICK	grass	
+[00:01:28]: AC_SMOKE JOB	STORE	treasurechest	
+[00:01:44]: AC_SMOKE PASS native grass	
+[00:01:45]: AC_SMOKE JOB	PICK	farm_plant_carrot	
+[00:01:48]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:09]: AC_SMOKE PASS native crop	
+[00:02:11]: AC_SMOKE JOB	PICK	farm_plant_carrot	
+[00:02:12]: AC_SMOKE JOB	AC_HAMMER	carrot_oversized	
+[00:02:13]: AC_SMOKE JOB	PICKUP	carrot	
+[00:02:16]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:18]: AC_SMOKE JOB	PICKUP	carrot_seeds	
+[00:02:19]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:21]: AC_SMOKE JOB	PICKUP	carrot_seeds	
+[00:02:23]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:25]: AC_SMOKE JOB	PICKUP	carrot	
+[00:02:27]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:29]: AC_SMOKE JOB	PICKUP	carrot	
+[00:02:31]: AC_SMOKE JOB	STORE	treasurechest	
+[00:02:59]: AC_SMOKE PASS giant crop chain	
+[00:03:04]: AC_SMOKE PASS pause	
+[00:03:05]: AC_SMOKE JOB	PICKUP	cutgrass	
+[00:03:08]: AC_SMOKE JOB	STORE	treasurechest	
+[00:03:19]: AC_SMOKE PASS resume and save record	
+[00:03:19]: AC_SMOKE SUCCESS	
