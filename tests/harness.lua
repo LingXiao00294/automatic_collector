@@ -49,7 +49,14 @@ local function entity(prefab, x, tags)
     function e:GetDistanceSqToInst(other) return self:GetDistanceSqToPoint(other:GetPosition()) end
     function e:GetCurrentPlatform() return self.platform end
     function e:IsOnPassablePoint() return self.passable ~= false end
-    function e:DoPeriodicTask(_, fn) self.periodic = fn return { Cancel = function() end } end
+    function e:DoPeriodicTask(period, fn, initialdelay)
+        local task = { period = period, fn = fn, nexttime = now + (initialdelay or period) }
+        function task:Cancel() self.cancelled = true end
+        self.periodictasks = self.periodictasks or {}
+        table.insert(self.periodictasks, task)
+        self.periodic = fn
+        return task
+    end
     function e:DoTaskInTime(_, fn) fn(self) end
     function e:PushEvent(name, data) table.insert(self.events, { name = name, data = data }) end
     function e:ClearBufferedAction() self.buffered = nil end
@@ -147,8 +154,14 @@ function BufferedAction(doer, target, action, item, pos)
     local a = { doer = doer, target = target, action = action, invobject = item, pos = pos, success = {}, fail = {} }
     function a:AddSuccessAction(fn) table.insert(self.success, fn) end
     function a:AddFailAction(fn) table.insert(self.fail, fn) end
-    function a:Succeed() for _, fn in ipairs(self.success) do fn() end end
-    function a:Fail() for _, fn in ipairs(self.fail) do fn() end end
+    function a:Succeed()
+        for _, fn in ipairs(self.success) do fn() end
+        self.success, self.fail = {}, {}
+    end
+    function a:Fail()
+        for _, fn in ipairs(self.fail) do fn() end
+        self.success, self.fail = {}, {}
+    end
     return a
 end
 local Worker = require("components/ac_worker")
@@ -207,7 +220,11 @@ local function chest(x, has, capacity)
     function c:IsFull() return self.capacity == 0 end
     function c:IsRestricted() return self.restricted == true end
     function c:CanOpen() return self.locked ~= true end
-    function c:IsOpenedByOthers() return self.open == true end
+    function c:IsOpenedByOthers(doer)
+        if self.open then return true end
+        for opener in pairs(self.openers) do if opener ~= doer then return true end end
+        return false
+    end
     function c:IsOpenedBy(doer) return self.openers[doer] == true end
     function c:Open(doer)
         self.openers[doer] = true
@@ -249,6 +266,100 @@ local function execute(w, action)
 end
 
 scenarios = {}
+local function advance_periodic(inst, deadline)
+    while true do
+        local nexttask = nil
+        for _, task in ipairs(inst.periodictasks or {}) do
+            if not task.cancelled and task.nexttime <= deadline
+                and (nexttask == nil or task.nexttime < nexttask.nexttime) then
+                nexttask = task
+            end
+        end
+        if nexttask == nil then break end
+        now = nexttask.nexttime
+        nexttask.nexttime = now + nexttask.period
+        nexttask.fn(inst)
+    end
+    now = deadline
+end
+
+function scenarios.active_watchdog_fast_recovery()
+    local w = setup() local first, second = item("twigs",1), item("twigs",2)
+    local action = w:GetNextAction() assert(action.target == first)
+    local failures = 0 action:AddFailAction(function() failures = failures + 1 end)
+    first.components.inventoryitem.owner = entity("wilson",3)
+    advance_periodic(w.inst,.099)
+    assert(w.pending ~= nil and failures == 0)
+    advance_periodic(w.inst,.1)
+    assert(w.pending == nil and failures == 1 and Targets.IsAvailable(worker(4),first))
+    local replacement = w:GetNextAction() assert(replacement.target == second)
+    action:Fail()
+    advance_periodic(w.inst,.2)
+    assert(w.pending.action == replacement and failures == 1)
+end
+
+function scenarios.watchdog_idle_and_lifecycle()
+    local w = setup()
+    local idle = w.task
+    assert(idle.period == .5 and w:GetNextAction() == nil)
+    local before = scans
+    for tick = 1, 4 do
+        advance_periodic(w.inst,tick * .1)
+        assert(w:GetNextAction() == nil and w.task == idle)
+    end
+    assert(scans == before)
+    item("twigs",1)
+    advance_periodic(w.inst,.5)
+    local action = w:GetNextAction()
+    assert(action ~= nil and idle.cancelled and w.task.period == .1)
+    local active = w.task
+    w.inst.buffered = action w:PerformAction(action)
+    assert(active.cancelled and w.task.period == .5)
+    now = 1
+    action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
+    active = w.task
+    w:SetEnabled(false)
+    assert(active.cancelled and w.task.period == .5 and w:GetCargo() ~= nil)
+    local stopped = w.task w:OnRemoveFromEntity()
+    assert(stopped.cancelled)
+end
+
+function scenarios.active_watchdog_keeps_valid_target()
+    local w = setup() local target = item("twigs",3)
+    local action = w:GetNextAction()
+    local validations, before = 0, scans
+    local validate = w.ValidateAction
+    function w:ValidateAction(current)
+        validations = validations + 1
+        return validate(self,current)
+    end
+    item("twigs",1)
+    advance_periodic(w.inst,.31)
+    -- Each patrol checks only the current pickup and its receiving containers.
+    -- No work-area scan/reselection is caused by a new, nearer item.
+    assert(validations == 3 and scans - before == 3 and w.pending.action == action)
+    assert(action.target == target and w.inst.mutations == nil)
+    local active = w.task action:Fail()
+    assert(active.cancelled and w.task.period == .5)
+    advance_periodic(w.inst,.7)
+    assert(validations == 3)
+end
+
+function scenarios.active_watchdog_rechecks_work_and_capacity()
+    local w = setup() local p = plant(1)
+    w:GetNextAction()
+    p.components.pickable.mature = false
+    advance_periodic(w.inst,.1)
+    assert(w.pending == nil and w.farm_count == 0 and w.cooldowns[p] == nil)
+    chest(2)
+    local cargo = item("twigs",1) w.inst.components.inventory:GiveItem(cargo)
+    local action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
+    action.target.components.container.capacity = 0
+    advance_periodic(w.inst,.2)
+    assert(w.pending == nil and w:GetCargo() == cargo and w.task.period == .5)
+    assert(w:GetNextAction().target ~= action.target)
+end
+
 function scenarios.single_target()
     local w = setup()
     local a, b = item("twigs", 1), item("twigs", 2)
@@ -444,6 +555,82 @@ local function enter(w, action, name)
     state.onenter(w.inst)
     return state
 end
+
+local function walk_to(w, action)
+    -- Before arrival the action belongs to locomotor, not the work stategraph.
+    w.inst.buffered = nil
+    w.inst.sg = {state="walk",GoToState=function(self,name) self.state = name end}
+    local loco = w.inst.components.locomotor
+    loco.dest, loco.bufferedaction = action.target, action
+    function loco:Stop() self.stops = (self.stops or 0) + 1 end
+    function loco:Clear()
+        self.clears = (self.clears or 0) + 1 self.dest = nil
+        -- Native locomotor Clear calls Fail again on its stored BufferedAction.
+        if self.bufferedaction ~= nil then self.bufferedaction:Fail() end
+        self.bufferedaction = nil
+    end
+    return loco
+end
+
+function scenarios.pickup_stolen_en_route()
+    local w = setup() local first, second = item("twigs",4), item("flint",6)
+    local action = w:GetNextAction() assert(action.target == first)
+    local loco = walk_to(w,action)
+    local failed = 0 action:AddFailAction(function() failed = failed + 1 end)
+    local player = entity("wilson",4) player.components.inventory = inventory(player)
+    player.components.inventory:GiveItem(first)
+    now = .5 w:Watchdog() w:Watchdog()
+    assert(failed == 1 and w.pending == nil and loco.dest == nil and loco.bufferedaction == nil)
+    assert(loco.stops == 1 and loco.clears == 1 and w.inst.sg.state == "idle")
+    assert(w:GetCargo() == nil and first.components.inventoryitem.owner == player
+        and first.components.stackable:StackSize() == 1 and not w:IsCoolingDown(first))
+    assert(Targets.IsAvailable(worker(),first), "The stolen item's old claim is released")
+    local next_action = w:GetNextAction() assert(next_action.target == second)
+    action:Succeed() assert(w.pending.action == next_action, "Stale callbacks cannot finish a new job")
+    execute(w,next_action) execute(w,w:GetNextAction())
+    assert(w:GetCargo() == nil and first.components.inventoryitem.owner == player)
+end
+
+function scenarios.pickup_removed_en_route()
+    local w = setup() local first, second = item("twigs",4), item("flint",6)
+    local action = w:GetNextAction() local loco = walk_to(w,action)
+    first.valid = false now = .5 w:Watchdog()
+    assert(w.pending == nil and loco.dest == nil and w.inst.sg.state == "idle")
+    assert(w:GetNextAction().target == second and w.inst.mutations == nil)
+end
+
+function scenarios.pickup_stolen_preserves_carried_stack()
+    local w = worker() local c = chest(5)
+    local cargo, drop = item("twigs",0,nil,3), item("twigs",4,nil,2)
+    w.inst.components.inventory:GiveItem(cargo)
+    local action = w:GetNextAction() assert(action.target == drop)
+    walk_to(w,action)
+    local other = worker(4) other.inst.components.inventory:GiveItem(drop)
+    now = .5 w:Watchdog()
+    assert(w:GetCargo() == cargo and cargo.components.stackable:StackSize() == 3
+        and w.inst.components.inventory.drops == nil)
+    local store = w:GetNextAction() assert(store.action == ACTIONS.STORE and store.target == c)
+    execute(w,store)
+    assert(c.components.container.stored.twigs == 3 and other:GetCargo() == drop
+        and drop.components.stackable:StackSize() == 2)
+end
+
+function scenarios.work_targets_change_en_route()
+    local w = setup() local first, second = plant(4), plant(6)
+    local action = w:GetNextAction() assert(action.target == first)
+    walk_to(w,action)
+    first.components.pickable.mature = false now = .5 w:Watchdog()
+    assert(w.pending == nil and first.harvests == nil and w.farm_count == 0)
+    assert(w:GetNextAction().target == second)
+    w:Cancel(true)
+    local fruit = giant()
+    action = w:GetNextAction() assert(action.target == fruit)
+    walk_to(w,action)
+    fruit.components.workable.workleft = 0 fruit.valid = false
+    now = now + .5 w:Watchdog()
+    assert(w.pending == nil and w.farm_count == 0 and w:GetNextAction().target == second)
+end
+
 function scenarios.impact_once()
     local w = setup() item("twigs",1)
     local state = enter(w,w:GetNextAction())
@@ -472,7 +659,8 @@ function scenarios.native_component_contract()
     p.components.pickable.caninteractwith = false
     assert(Targets.Kind(w,p) == nil)
     local c = chest(3) c.components.container.open = true
-    assert(not Targets.IsContainer(w,c))
+    c.components.container.locked = true -- CanOpen can be false solely due to an open limit.
+    assert(Targets.IsContainer(w,c))
     c.components.container.open = false c.components.container.restricted = true
     assert(not Targets.IsContainer(w,c))
 end
@@ -702,12 +890,33 @@ function scenarios.harvest_uses_ram_animation()
     assert(p.harvests == 1 and w.inst.mutations == 1)
 end
 
-function scenarios.pickup_arrives_over_item()
+function scenarios.pickup_uses_winona_arrival_distance()
     local w = setup() item("twigs",2)
     local action = w:GetNextAction()
-    assert(action.arrivedist == .15 and ACTIONS.PICKUP.distance == 1.5)
+    assert(action.arrivedist == 1 and ACTIONS.PICKUP.distance == 1.5)
     execute(w,action)
     assert(w:GetNextAction().arrivedist == nil, "Containers retain normal arrival distance")
+end
+
+function scenarios.two_workers_pickup_overlapping_drops()
+    -- Two radius .35 collectors can touch on either side of one drop point.
+    -- Both must reach their pickup state without occupying the exact same point.
+    local a, b = worker(-.35), worker(.35)
+    local c = chest(5)
+    local first, second = item("twigs",0), item("flint",0)
+    local left, right = a:GetNextAction(), b:GetNextAction()
+    assert(left.target == first and right.target == second)
+    assert(a.inst:GetDistanceSqToInst(first) <= left.arrivedist ^ 2
+        and b.inst:GetDistanceSqToInst(second) <= right.arrivedist ^ 2,
+        "Touching collectors must already be close enough to start pickup")
+    local left_state, right_state = enter(a,left), enter(b,right)
+    a.inst.sg.timeinstate = .5 left_state.onupdate(a.inst)
+    b.inst.sg.timeinstate = .5 right_state.onupdate(b.inst)
+    assert(a:GetCargo() == first and b:GetCargo() == second)
+    left_state.ontimeout(a.inst) right_state.ontimeout(b.inst)
+    now = now + 1
+    execute(a,a:GetNextAction()) execute(b,b:GetNextAction())
+    assert(c.components.container.stored.twigs == 1 and c.components.container.stored.flint == 1)
 end
 
 local function enter_store(speed)
@@ -732,6 +941,52 @@ function scenarios.store_open_window()
     assert(container:IsOpenedBy(w.inst) and w.inst.mutations == 1)
     state.ontimeout(w.inst)
     assert(not container:IsOpenedBy(w.inst) and w.inst.components.inventory.closes == 1)
+end
+
+function scenarios.two_workers_store_in_open_chest()
+    local a, b = worker(), worker()
+    local c = chest(3) local container = c.components.container
+    a.inst.components.inventory:GiveItem(item("twigs",0,nil,3))
+    b.inst.components.inventory:GiveItem(item("twigs",0,nil,4))
+    local first, second = a:GetNextAction(), b:GetNextAction()
+    assert(first.target == c and second.target == c)
+    local first_state, second_state = enter(a,first,"store"), enter(b,second,"store")
+    a.inst.sg.timeinstate = .2 first_state.onupdate(a.inst)
+    assert(container:IsOpenedBy(a.inst) and container:IsOpenedByOthers(b.inst))
+    container.open = true -- A player also keeps the box open throughout both deliveries.
+    container.locked = true -- Model CanOpen=false from an opening limit during preflight.
+    now = .5 b:Watchdog()
+    assert(b.pending ~= nil and b.pending.action == second and b:ValidateAction(second))
+    -- Keep native STORE's own opening-limit restrictions; a normal chest has no limit.
+    container.locked = false
+    b.inst.sg.timeinstate = .2 second_state.onupdate(b.inst)
+    assert(a:GetCargo() == nil and b:GetCargo() == nil and container.stored.twigs == 7)
+    assert(a.inst.components.inventory.drops == nil and b.inst.components.inventory.drops == nil)
+    assert(container:IsOpenedBy(a.inst) and container:IsOpenedBy(b.inst))
+    first_state.ontimeout(a.inst)
+    assert(not container:IsOpenedBy(a.inst) and container:IsOpenedBy(b.inst) and container.open)
+    second_state.ontimeout(b.inst)
+    assert(not container:IsOpenedBy(b.inst) and container.open)
+end
+
+function scenarios.two_workers_store_rechecks_remaining_capacity()
+    local a, b = worker(), worker()
+    local c, backup = chest(3,nil,7), chest(7)
+    a.inst.components.inventory:GiveItem(item("twigs",0,nil,5))
+    b.inst.components.inventory:GiveItem(item("twigs",0,nil,5))
+    local first, second = a:GetNextAction(), b:GetNextAction()
+    assert(first.target == c and second.target == c)
+    local first_state = enter(a,first,"store")
+    a.inst.sg.timeinstate = .2 first_state.onupdate(a.inst)
+    assert(c.components.container:IsOpenedBy(a.inst) and c.components.container.capacity == 2)
+    now = .5 b:Watchdog()
+    assert(b.pending == nil and b:GetCargo().components.stackable:StackSize() == 5
+        and not b:IsCoolingDown(c) and c.components.container:IsOpenedBy(a.inst))
+    local replacement = b:GetNextAction() assert(replacement.target == backup)
+    execute(b,replacement)
+    assert(c.components.container.stored.twigs == 5 and backup.components.container.stored.twigs == 5
+        and b.inst.components.inventory.drops == nil)
+    first_state.ontimeout(a.inst)
 end
 
 function scenarios.store_open_speed()
@@ -892,7 +1147,10 @@ function scenarios.giant_matching_open_container()
     c.components.container.open = true
     assert(w:ValidateAction(action))
     execute(w,action) execute(w,w:GetNextAction())
-    assert(w:GetNextAction() == nil, "Pickup still waits for the player to close the chest")
+    for _=1,3 do execute(w,w:GetNextAction()) end
+    execute(w,w:GetNextAction())
+    assert(c.components.container.stored.garlic == 3 and c.components.container.open,
+        "An open chest accepts cargo without closing the player's opener")
 end
 
 function scenarios.delivery_full_en_route()
@@ -1446,11 +1704,7 @@ function scenarios.farm_skips_unavailable_cargo()
         w:Cancel(true) w.nextscan = 0 w.farm_draining = true w.farm_count = 5
     end
     resumes() -- Full matching chest.
-    c.components.container.capacity = 40 c.components.container.open = true
-    resumes() -- Another opener makes the chest temporarily unavailable.
-    c.components.container.open = false c.components.container.locked = true
-    resumes()
-    c.components.container.locked = false
+    c.components.container.capacity = 40
     w.cooldowns[c] = now + 10
     resumes() -- Failed delivery container still cooling down.
     w.cooldowns[c] = nil

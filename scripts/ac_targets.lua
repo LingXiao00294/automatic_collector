@@ -99,8 +99,8 @@ function M.IsDeliveryContainer(worker, target)
 end
 
 function M.IsContainer(worker, target)
-    return M.IsDeliveryContainer(worker, target) and target.components.container:CanOpen()
-        and not target.components.container:IsOpenedByOthers(worker.inst)
+    -- Native storage robots choose receivers by item acceptance, not openers.
+    return M.IsDeliveryContainer(worker, target)
 end
 
 function M.IsFarmWork(target, kind)

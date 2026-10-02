@@ -15,8 +15,18 @@ local Worker = Class(function(self, inst)
     self.blocked = false
     self.farm_count = 0
     self.farm_draining = false
-    self.task = inst:DoPeriodicTask(.5, function() self:Watchdog() end)
+    self:RefreshWatchdog()
 end)
+
+function Worker:RefreshWatchdog()
+    local period = self.pending ~= nil and .1 or .5
+    if self.task ~= nil and self.taskperiod == period then return end
+    if self.task ~= nil then self.task:Cancel() end
+    self.taskperiod = period
+    -- Only an active job needs fast validation; idle planning keeps its .5s throttle.
+    local initialdelay = self.pending ~= nil and period or nil
+    self.task = self.inst:DoPeriodicTask(period, function() self:Watchdog() end, initialdelay)
+end
 
 function Worker:GetHome()
     if self.homeplatform ~= nil and self.homeplatform:IsValid() and self.homelocal ~= nil then
@@ -198,6 +208,7 @@ function Worker:Finish(action, success)
         if extra ~= nil then inventory:DropItem(extra, true) end
     end
     self.pending = nil
+    self:RefreshWatchdog()
     local sg = self.inst.sg
     -- Native STORE opens the target. Successful animated delivery keeps it open
     -- until the store state's onexit; failures and non-animated jobs close now.
@@ -274,10 +285,10 @@ function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
         or GetTime() - self.pending.started > self.config.action_timeout) then
         self:Cancel()
-    elseif self.pending ~= nil and self.pending.kind == "store"
-        and not self:ValidateAction(self.pending.action) then
-        -- Capacity, filters or another opener may change during the walk.
-        -- Replan immediately without penalising a container whose capacity changed.
+    elseif self.pending ~= nil and not self:ValidateAction(self.pending.action) then
+        -- Targets can be picked, harvested or removed while we are still walking.
+        -- Notify DoAction, release the claim and clear movement for every job kind.
+        -- Changed world conditions are not a path failure and need no cooldown.
         self:Cancel(true)
     end
 end
@@ -338,13 +349,15 @@ function Worker:GetNextAction()
     end
     local buffered = BufferedAction(self.inst, target, action, kind == "store" and cargo or nil)
     if kind == "pickup" then
-        -- Drive over the item before sinking, without changing global PICKUP.
-        buffered.arrivedist = .15
+        -- Winona's storage robot starts pickup from one unit away. Do not force
+        -- collectors targeting overlapping drops to squeeze into the same point.
+        buffered.arrivedist = 1
     end
     self.pending = { action = buffered, kind = kind, claimtarget = target,
         farm = Targets.IsFarmWork(target, kind), started = GetTime() }
     buffered:AddSuccessAction(function() self:Finish(buffered, true) end)
     buffered:AddFailAction(function() self:Finish(buffered, false) end)
+    self:RefreshWatchdog()
     return buffered
 end
 
