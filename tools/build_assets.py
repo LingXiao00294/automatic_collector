@@ -151,7 +151,7 @@ def pose(name: str, view: str, t: float) -> list[Element]:
         )
         tilt = smooth_keys(t, [(0, 0), (0.35, -4), (21 / 38, 6), (0.7, -2), (1, 0)])
     elif name == "store":
-        nod = smooth_keys(t, [(0, 0), (0.3, 0.5), (15 / 29, 1), (0.65, 1), (1, 0)])
+        nod = smooth_keys(t, [(0, 0), (3 / 29, 0.5), (6 / 29, 1), (0.65, 1), (1, 0)])
         bob = nod * 8
         tilt = nod * 5
 
@@ -404,15 +404,23 @@ def converter(tool_dir: Path, source: Path, destination: Path) -> None:
         raise ValueError(f"Texture conversion failed: {destination}")
 
 
-def icon(image: Image.Image, size: int, path: Path, tool_dir: Path, element_name: str) -> None:
+def icon(
+    image: Image.Image,
+    size: int,
+    path: Path,
+    tool_dir: Path,
+    element_name: str,
+    padding: int = 4,
+) -> None:
     bbox = image.getchannel("A").getbbox()
     if bbox is None:
         raise ValueError("Empty icon")
     thumb = image.crop(bbox)
-    thumb.thumbnail((size - 8, size - 8), Image.Resampling.LANCZOS)
+    thumb.thumbnail((size - 2 * padding, size - 2 * padding), Image.Resampling.LANCZOS)
     output = Image.new("RGBA", (size, size))
     output.alpha_composite(thumb, ((size - thumb.width) // 2, (size - thumb.height) // 2))
-    png = GENERATED / f"{path.name}.png"
+    prefix = "inventory_" if path.parent.name == "inventoryimages" else ""
+    png = GENERATED / f"{prefix}{path.name}.png"
     output.save(png)
     converter(tool_dir, png, path.with_suffix(".tex"))
     root = ET.Element("Atlas")
@@ -497,10 +505,11 @@ def build(tool_dir: Path) -> None:
     image = render(pose("idle", "down", 0), parts)
     icon(
         image,
-        128,
+        64,
         ROOT / "images/inventoryimages/automatic_collector",
         tool_dir,
         "automatic_collector.tex",
+        padding=8,
     )
     icon(
         image,

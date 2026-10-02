@@ -11,6 +11,7 @@ function Class(base, ctor)
 end
 math.clamp = function(x, a, b) return math.max(a, math.min(b, x)) end
 local now = 0
+FRAMES = 1 / 30
 GetTime = function() return now end
 function Vector3(x, y, z)
     local v = { x = x, y = y, z = z }
@@ -67,9 +68,13 @@ local function entity(prefab, x, tags)
             action.target.components.pickable:Pick(self)
         elseif action.action == ACTIONS.HARVEST then
             action.target.components.crop:Harvest(self)
+        elseif action.action == ACTIONS.AC_HAMMER then
+            action.target.components.workable:WorkedBy(self,1)
         elseif action.action == ACTIONS.STORE then
             local cargo = self.components.inventory:RemoveItem(action.invobject)
             local container = action.target.components.container
+            -- Native STORE opens stationary containers as it transfers the item.
+            container:Open(self)
             local count = cargo.components.stackable:StackSize()
             container.stored[cargo.prefab] = (container.stored[cargo.prefab] or 0) + count
             container.capacity = container.capacity - count
@@ -83,7 +88,7 @@ local function entity(prefab, x, tags)
     return e
 end
 local function inventory(owner)
-    local inv = { owner = owner, items = {}, maxslots = 1, closes = 0 }
+    local inv = { owner = owner, items = {}, maxslots = 1, closes = 0, opencontainers = {} }
     inv.itemslots = inv.items
     function inv:GetFirstItemInAnySlot()
         for slot=1,self.maxslots do if self.items[slot] ~= nil then return self.items[slot] end end
@@ -100,7 +105,14 @@ local function inventory(owner)
         return math.min(room,count)
     end
     function inv:GetActiveItem() return self.active end
-    function inv:CloseAllChestContainers() self.closes = self.closes + 1 end
+    function inv:CloseAllChestContainers()
+        self.closes = self.closes + 1
+        for target in pairs(self.opencontainers) do
+            if target:IsValid() and target.components.container.type == "chest" then
+                target.components.container:Close(self.owner)
+            end
+        end
+    end
     function inv:GiveItem(item)
         for slot=1,self.maxslots do
             local existing = self.items[slot]
@@ -120,9 +132,12 @@ local function inventory(owner)
         for i, value in pairs(self.items) do if value == item then self.items[i] = nil item.components.inventoryitem.owner = nil return item end end
         if self.active == item then self.active = nil item.components.inventoryitem.owner = nil return item end
     end
-    function inv:DropItem(item)
+    function inv:DropItem(item, wholestack, randomdir)
+        if item.components.inventoryitem.islockedinslot then return nil end
         self:RemoveItem(item)
         item.Transform:SetPosition(self.owner.Transform:GetWorldPosition())
+        self.drops = self.drops or {}
+        table.insert(self.drops, { item = item, wholestack = wholestack, randomdir = randomdir })
         return item
     end
     function inv:DropEverything() self.items = {} self.itemslots = self.items self.active = nil end
@@ -182,13 +197,22 @@ local function item(prefab, x, tags, count)
 end
 local function chest(x, has, capacity)
     local e = entity("treasurechest", x, { "_container" })
-    local c = { type = "chest", canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {} }
+    local c = { type = "chest", canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {}, openers = {} }
     function c:Has(prefab) return self.has[prefab] == true end
     function c:CanAcceptCount(it, maxcount) return math.min(self.capacity, maxcount or it.components.stackable:StackSize()) end
     function c:IsFull() return self.capacity == 0 end
     function c:IsRestricted() return self.restricted == true end
     function c:CanOpen() return self.locked ~= true end
     function c:IsOpenedByOthers() return self.open == true end
+    function c:IsOpenedBy(doer) return self.openers[doer] == true end
+    function c:Open(doer)
+        self.openers[doer] = true
+        doer.components.inventory.opencontainers[e] = true
+    end
+    function c:Close(doer)
+        self.openers[doer] = nil
+        doer.components.inventory.opencontainers[e] = nil
+    end
     e.components.container = c
     return e
 end
@@ -213,6 +237,13 @@ local function setup()
     chest(5)
     return w
 end
+local function execute(w, action)
+    assert(w:ValidateAction(action))
+    w.inst.buffered = action
+    w:PerformAction(action)
+    now = now + 1.1
+end
+
 scenarios = {}
 function scenarios.single_target()
     local w = setup()
@@ -241,9 +272,14 @@ end
 function scenarios.full_chest()
     local w = worker() local c = chest(3, nil, 0)
     local cargo = item("twigs",1) w.inst.components.inventory:GiveItem(cargo)
-    assert(w:GetNextAction() == nil and w.blocked and w:GetCargo() == cargo)
+    assert(w:GetNextAction() == nil and not w.blocked and w:GetCargo() == nil)
+    assert(cargo:IsValid() and cargo.components.inventoryitem.owner == nil and cargo.x == 0)
+    now = .5 assert(w:GetNextAction() == nil, "Do not pick up undeliverable dropped cargo")
     c.components.container.capacity = 40 now = 1
-    assert(w:GetNextAction().action == ACTIONS.STORE and not w.blocked)
+    local pickup = w:GetNextAction() assert(pickup.action == ACTIONS.PICKUP and not w.blocked)
+    execute(w,pickup)
+    execute(w,w:GetNextAction())
+    assert(c.components.container.stored.twigs == 1)
 end
 function scenarios.two_workers()
     local a, b = worker(), worker() chest(5)
@@ -290,7 +326,18 @@ end
 local function giant(prefab)
     local e = item(prefab or "carrot_oversized",1,{"oversized_veggie","heavy"})
     e.components.inventoryitem.cangoincontainer = false
-    e.components.workable = { CanBeWorked = function() return true end, GetWorkAction = function() return ACTIONS.HAMMER end }
+    local product = e.prefab:match("^(.-)_oversized")
+    e.components.lootdropper = {loot={product,product,product.."_seeds",product.."_seeds",product}}
+    local workable = {workleft=3, GetWorkAction=function() return ACTIONS.HAMMER end}
+    function workable:CanBeWorked() return self.workleft > 0 end
+    function workable:WorkedBy(_,amount)
+        self.workleft = self.workleft - amount
+        if self.workleft <= 0 then
+            e.valid = false
+            for _, loot in ipairs(e.components.lootdropper.loot) do item(loot,e.x) end
+        end
+    end
+    e.components.workable = workable
     return e
 end
 function scenarios.giant_hammer()
@@ -378,7 +425,18 @@ local function enter(w, action, name)
     w.inst.buffered = action
     w.inst.AnimState = {SetDeltaTimeMultiplier=function() end, PlayAnimation=function(_, animation) w.inst.animation = animation end}
     w.inst.SoundEmitter = {PlaySound=function() end}
-    w.inst.sg = {statemem={}, timeinstate=0, SetTimeout=function(self,t) self.timeout=t end}
+    w.inst.sg = {statemem={}, timeinstate=0, currentstate=state,
+        SetTimeout=function(self,t) self.timeout=t end,
+        GoToState=function(self,name)
+            if self.currentstate.onexit ~= nil then self.currentstate.onexit(w.inst) end
+            for _, nextstate in ipairs(states) do
+                if nextstate.name == name then
+                    self.currentstate, self.statemem, self.timeinstate = nextstate, {}, 0
+                    if nextstate.onenter ~= nil then nextstate.onenter(w.inst) end
+                    return
+                end
+            end
+        end}
     state.onenter(w.inst)
     return state
 end
@@ -413,13 +471,6 @@ function scenarios.native_component_contract()
     assert(not Targets.IsContainer(w,c))
     c.components.container.open = false c.components.container.restricted = true
     assert(not Targets.IsContainer(w,c))
-end
-
-local function execute(w, action)
-    assert(w:ValidateAction(action))
-    w.inst.buffered = action
-    w:PerformAction(action)
-    now = now + 1.1
 end
 
 function scenarios.merge_then_deliver()
@@ -651,4 +702,357 @@ function scenarios.pickup_arrives_over_item()
     assert(action.arrivedist == .15 and ACTIONS.PICKUP.distance == 1.5)
     execute(w,action)
     assert(w:GetNextAction().arrivedist == nil, "Containers retain normal arrival distance")
+end
+
+local function enter_store(speed)
+    local w = worker()
+    local c = chest(3)
+    w.inst.components.inventory:GiveItem(item("twigs",0,nil,3))
+    if speed ~= nil then w:SetActionSpeed(speed) end
+    return w, c, enter(w,w:GetNextAction(),"store")
+end
+
+function scenarios.store_open_window()
+    local w,c,state = enter_store()
+    local container = c.components.container
+    assert(not container:IsOpenedBy(w.inst))
+    w.inst.sg.timeinstate = 5 * FRAMES state.onupdate(w.inst)
+    assert(w.inst.mutations == nil and not container:IsOpenedBy(w.inst))
+    w.inst.sg.timeinstate = 6 * FRAMES state.onupdate(w.inst) state.onupdate(w.inst)
+    assert(w.inst.mutations == 1 and w.pending == nil and w:GetCargo() == nil)
+    assert(container.stored.twigs == 3 and container:IsOpenedBy(w.inst))
+    assert(w.inst.components.inventory.closes == 0)
+    w.inst.sg.timeinstate = .99 state.onupdate(w.inst)
+    assert(container:IsOpenedBy(w.inst) and w.inst.mutations == 1)
+    state.ontimeout(w.inst)
+    assert(not container:IsOpenedBy(w.inst) and w.inst.components.inventory.closes == 1)
+end
+
+function scenarios.store_open_speed()
+    local w,c,state = enter_store(2)
+    assert(w.inst.sg.timeout == .5)
+    w.inst.sg.timeinstate = .09 state.onupdate(w.inst)
+    assert(w.inst.mutations == nil)
+    w.inst.sg.timeinstate = .1 state.onupdate(w.inst)
+    assert(c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == 3)
+    w.inst.sg.timeinstate = .49 state.onupdate(w.inst)
+    assert(c.components.container:IsOpenedBy(w.inst))
+    state.ontimeout(w.inst)
+    assert(not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_interrupted()
+    local w,c,state = enter_store()
+    w.inst.sg.timeinstate = .1 state.onupdate(w.inst)
+    w:SetEnabled(false)
+    assert(w.pending == nil and w:GetCargo() ~= nil and c.components.container.stored.twigs == nil)
+    assert(not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_cancelled_after_success()
+    local w,c,state = enter_store()
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and c.components.container:IsOpenedBy(w.inst))
+    c.components.container.open = true -- Another opener must not be closed by the robot.
+    w:SetEnabled(false)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.open)
+    assert(c.components.container.stored.twigs == 3 and w.inst.mutations == 1)
+end
+
+function scenarios.store_open_failed_preflight()
+    local w,c,state = enter_store()
+    c.components.container.capacity = 0
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.inst.mutations == nil and w.pending == nil and w:GetCargo() ~= nil)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == nil)
+end
+
+function scenarios.store_direct_closes()
+    local w = worker() local c = chest(3)
+    w.inst.components.inventory:GiveItem(item("twigs",0,nil,3))
+    execute(w,w:GetNextAction())
+    assert(c.components.container.stored.twigs == 3 and not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_failed_action()
+    local w,c,state = enter_store()
+    function w.inst:PerformBufferedAction()
+        -- A third-party container can reject delivery after native STORE opens it.
+        local action = self.buffered
+        action.target.components.container:Open(self)
+        action:Fail()
+        self.buffered = nil
+    end
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and w:GetCargo().components.stackable:StackSize() == 3)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == nil)
+    assert(w.inst.components.inventory.closes == 1)
+end
+
+function scenarios.giant_matching_primary_sample()
+    local w = worker() w.config.matching_only = true
+    local fridge = chest(3,{garlic=true}) fridge.prefab = "icebox"
+    local e = giant("garlic_oversized")
+    for stroke=1,3 do
+        local action = w:GetNextAction()
+        assert(action.target == e and action.action == ACTIONS.AC_HAMMER)
+        local state = enter(w,action,"hammer")
+        w.inst.sg.timeinstate = .69 state.onupdate(w.inst)
+        assert(e.components.workable.workleft == 4 - stroke)
+        w.inst.sg.timeinstate = .7 state.onupdate(w.inst) state.onupdate(w.inst)
+        assert(e.components.workable.workleft == 3 - stroke)
+        state.ontimeout(w.inst) now = now + 1.4
+    end
+    assert(not e:IsValid() and w.inst.mutations == 3)
+    for _=1,3 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.PICKUP and action.target.prefab == "garlic")
+        execute(w,action)
+    end
+    assert(w:GetCargo().components.stackable:StackSize() == 3)
+    local action = w:GetNextAction()
+    assert(action.action == ACTIONS.STORE and action.target == fridge)
+    execute(w,action)
+    assert(fridge.components.container.stored.garlic == 3 and w:GetNextAction() == nil)
+    local seeds = 0
+    for _, target in ipairs(entities) do
+        if target.prefab == "garlic_seeds" and target:IsValid() then
+            assert(target.components.inventoryitem.owner == nil)
+            seeds = seeds + target.components.stackable:StackSize()
+        end
+    end
+    assert(seeds == 2, "Unmatched seed byproducts stay on the ground")
+end
+
+function scenarios.giant_matching_split_destinations()
+    local w = worker() w.config.matching_only = true
+    chest(3,{garlic=true}) chest(4,{garlic_seeds=true})
+    local e = giant("garlic_oversized")
+    assert(w:GetNextAction().target == e)
+end
+
+function scenarios.giant_matching_wrong_or_full_sample()
+    local w = worker() w.config.matching_only = true
+    local c = chest(3,{goldnugget=true})
+    giant("garlic_oversized")
+    assert(w:GetNextAction() == nil, "Unrelated samples cannot approve giant work")
+    c.components.container.has = {garlic_seeds=true}
+    c.components.container.capacity = 0 now = 1
+    assert(w:GetNextAction() == nil, "A full destination must not approve giant work")
+    c.components.container.capacity = 40 now = 2
+    assert(w:GetNextAction().action == ACTIONS.AC_HAMMER)
+end
+
+function scenarios.giant_matching_seed_sample()
+    local w = worker() w.config.matching_only = true
+    local c = chest(3,{garlic_seeds=true})
+    local e = giant("garlic_oversized")
+    for _=1,3 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.AC_HAMMER and action.target == e)
+        execute(w,action)
+    end
+    for _=1,2 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.PICKUP and action.target.prefab == "garlic_seeds")
+        execute(w,action)
+    end
+    assert(w:GetCargo().components.stackable:StackSize() == 2)
+    local action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
+    execute(w,action)
+    assert(c.components.container.stored.garlic_seeds == 2 and w:GetNextAction() == nil)
+    local vegetables = 0
+    for _, target in ipairs(entities) do
+        if target.prefab == "garlic" and target:IsValid() then
+            assert(target.components.inventoryitem.owner == nil)
+            vegetables = vegetables + target.components.stackable:StackSize()
+        end
+    end
+    assert(vegetables == 3, "Unmatched vegetables stay on the ground")
+end
+
+function scenarios.giant_matching_open_container()
+    local w = worker() w.config.matching_only = true
+    local c = chest(3,{garlic=true}) c.prefab = "icebox"
+    local e = giant("garlic_oversized")
+    c.components.container.open = true
+    assert(w:GetNextAction() == nil)
+    c.components.container.open = false now = 1
+    local action = w:GetNextAction() assert(action.target == e)
+    c.components.container.open = true
+    assert(not w:ValidateAction(action), "Recheck player opening at ram contact")
+end
+
+function scenarios.delivery_full_en_route()
+    local w = worker()
+    local first, backup = chest(3), chest(7)
+    w.inst.components.inventory:GiveItem(item("twigs",0,nil,5))
+    local action = w:GetNextAction() assert(action.target == first)
+    local failed = 0 action:AddFailAction(function() failed = failed + 1 end)
+    w.inst.buffered = action w.inst.x = 2
+    first.components.container.capacity = 0 now = .5
+    w:Watchdog()
+    assert(failed == 1 and w.pending == nil and w.inst.buffered == nil)
+    assert(not w:IsCoolingDown(first) and w:GetCargo().components.stackable:StackSize() == 5)
+    local replacement = w:GetNextAction()
+    assert(replacement.target == backup and replacement.action == ACTIONS.STORE)
+    execute(w,replacement)
+    assert(backup.components.container.stored.twigs == 5 and w:GetCargo() == nil)
+end
+
+function scenarios.delivery_full_drop_recovers()
+    local w = worker() local c = chest(3)
+    local cargo = item("twigs",0,nil,5) w.inst.components.inventory:GiveItem(cargo)
+    w:GetNextAction() w.inst.x = 3 c.components.container.capacity = 0 now = .5
+    w:Watchdog()
+    local home = w:GetNextAction()
+    assert(home.action == ACTIONS.WALKTO and home.pos.x == 0 and not w.blocked)
+    assert(w:GetCargo() == nil and w.pending == nil)
+    assert(cargo:IsValid() and cargo.components.inventoryitem.owner == nil and cargo.x == 3)
+    assert(cargo.components.stackable:StackSize() == 5 and c.components.container.stored.twigs == nil)
+    local drop = w.inst.components.inventory.drops[1]
+    assert(drop.item == cargo and drop.wholestack and drop.randomdir,
+        "Use the same whole-stack fling flags as native GoHomeAction")
+    w.inst.x = 0 now = 1
+    assert(w:GetNextAction() == nil and not w.blocked)
+    assert(#w.inst.components.inventory.drops == 1, "No pickup/drop loop while full")
+    c.components.container.capacity = 40 now = 1.5
+    local pickup = w:GetNextAction()
+    assert(pickup.target == cargo and pickup.action == ACTIONS.PICKUP and not w:IsCoolingDown(c))
+    execute(w,pickup)
+    execute(w,w:GetNextAction()) assert(c.components.container.stored.twigs == 5)
+end
+
+function scenarios.delivery_drop_one_group()
+    local w = worker() w.config.matching_only = true w:SetCarrySlots(2)
+    local c = chest(3,{cutgrass=true})
+    local undeliverable = item("twigs",0,nil,5)
+    local deliverable = item("cutgrass",0,nil,7)
+    w.inst.components.inventory:GiveItem(undeliverable)
+    w.inst.components.inventory:GiveItem(deliverable)
+    w.inst.x = 2
+    assert(w:GetNextAction().action == ACTIONS.WALKTO)
+    assert(undeliverable.components.inventoryitem.owner == nil and undeliverable.x == 2)
+    assert(deliverable.components.inventoryitem.owner == w.inst and #w.inst.components.inventory.drops == 1)
+    now = .5 local action = w:GetNextAction()
+    assert(action.action == ACTIONS.STORE and action.invobject == deliverable)
+    execute(w,action)
+    assert(c.components.container.stored.cutgrass == 7 and w:GetCargo() == nil)
+    assert(undeliverable.components.stackable:StackSize() == 5)
+end
+
+function scenarios.delivery_drop_active_cargo()
+    local w = worker() local c = chest(3,nil,0)
+    local cargo = item("twigs",0,nil,9)
+    w.inst.components.inventory.active = cargo cargo.components.inventoryitem.owner = w.inst
+    w.inst.x = 2
+    assert(w:GetNextAction().action == ACTIONS.WALKTO and w:GetCargo() == nil)
+    assert(cargo:IsValid() and cargo.components.inventoryitem.owner == nil and cargo.x == 2)
+    assert(cargo.components.stackable:StackSize() == 9 and c.components.container.stored.twigs == nil)
+end
+
+function scenarios.delivery_full_at_contact()
+    local w,c,state = enter_store()
+    local failed = 0 w.pending.action:AddFailAction(function() failed = failed + 1 end)
+    c.components.container.capacity = 0
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(failed == 1 and w.pending == nil and w:GetCargo() ~= nil)
+    assert(not w:IsCoolingDown(c) and not c.components.container:IsOpenedBy(w.inst))
+    state.ontimeout(w.inst)
+    local cargo = w:GetCargo()
+    now = 1 assert(w:GetNextAction() == nil and w:GetCargo() == nil)
+    assert(cargo:IsValid() and cargo.components.inventoryitem.owner == nil)
+    c.components.container.capacity = 40
+    now = 1.5 local pickup = w:GetNextAction() assert(pickup.target == cargo)
+    execute(w,pickup)
+    local retry = w:GetNextAction() assert(retry.target == c)
+    execute(w,retry) assert(c.components.container.stored.twigs == 3)
+end
+
+function scenarios.cancel_notifies_native_action()
+    local w = setup() item("twigs",1)
+    local action = w:GetNextAction()
+    local failed = 0 action:AddFailAction(function() failed = failed + 1 end)
+    w:Cancel() w:Cancel()
+    assert(failed == 1 and w.pending == nil, "Native DoAction must exit RUNNING on cancellation")
+end
+
+local function prepare_giants(w,count)
+    for _=1,count do
+        local action = w:GetNextAction()
+        assert(action ~= nil and action.action == ACTIONS.AC_HAMMER,
+            "Prepare all available giants before collecting any drops")
+        execute(w,action)
+        assert(w:GetCargo() == nil)
+    end
+end
+
+function scenarios.giant_batch_prepare_all()
+    local w = worker() w.config.matching_only = true local c = chest(4,{garlic=true})
+    local a,b = giant("garlic_oversized"),giant("garlic_oversized") b.x = 2
+    prepare_giants(w,6)
+    assert(not a:IsValid() and not b:IsValid())
+    for _=1,6 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.PICKUP and action.target.prefab == "garlic")
+        execute(w,action)
+    end
+    assert(w:GetCargo().components.stackable:StackSize() == 6)
+    local delivery = w:GetNextAction() assert(delivery.action == ACTIONS.STORE)
+    execute(w,delivery) assert(c.components.container.stored.garlic == 6)
+end
+
+function scenarios.giant_batch_mixed_groups()
+    local w = worker() w.config.matching_only = true local c = chest(4,{garlic=true,carrot=true})
+    local a,b = giant("garlic_oversized"),giant("carrot_oversized") b.x = 2
+    prepare_giants(w,6)
+    assert(not a:IsValid() and not b:IsValid())
+    for _, product in ipairs({"garlic","carrot"}) do
+        for _=1,3 do
+            local action = w:GetNextAction()
+            assert(action.action == ACTIONS.PICKUP and action.target.prefab == product)
+            execute(w,action)
+        end
+        assert(w:GetCargo().components.stackable:StackSize() == 3)
+        local action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
+        execute(w,action)
+        assert(c.components.container.stored[product] == 3)
+    end
+end
+
+function scenarios.giant_batch_stack_limit()
+    local w = worker() w.config.matching_only = true local c = chest(4,{garlic=true})
+    giant("garlic_oversized") local b = giant("garlic_oversized") b.x = 2
+    prepare_giants(w,6)
+    for _, e in ipairs(entities) do
+        if e.prefab == "garlic" then e.components.stackable.maxsize = 4 end
+    end
+    for _=1,4 do execute(w,w:GetNextAction()) end
+    assert(w:GetCargo().components.stackable:StackSize() == 4)
+    local delivery = w:GetNextAction() assert(delivery.action == ACTIONS.STORE)
+    execute(w,delivery) assert(c.components.container.stored.garlic == 4)
+    for _=1,2 do execute(w,w:GetNextAction()) end
+    delivery = w:GetNextAction() assert(delivery.action == ACTIONS.STORE)
+    execute(w,delivery) assert(c.components.container.stored.garlic == 6)
+end
+
+function scenarios.giant_batch_mature_plants()
+    local w = worker() w.config.matching_only = true local c = chest(4,{garlic=true})
+    item("garlic",.1)
+    local p = plant(2) p.tags.farm_plant = true p.is_oversized = true
+    p.plant_def = {product="garlic"}
+    function p.components.pickable:Pick()
+        self.mature = false
+        local e = giant("garlic_oversized") e.x = p.x
+    end
+    local action = w:GetNextAction()
+    assert(action.action == ACTIONS.PICK and action.target == p)
+    execute(w,action)
+    prepare_giants(w,3)
+    for _=1,4 do
+        action = w:GetNextAction() assert(action.action == ACTIONS.PICKUP)
+        execute(w,action)
+    end
+    action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
+    execute(w,action) assert(c.components.container.stored.garlic == 4)
 end

@@ -13,6 +13,6 @@
     "walk_pst": {"frames": 6, "impact_frame": null},
     "pickup": {"frames": 30, "impact_frame": 15},
     "hammer": {"frames": 39, "impact_frame": 21},
-    "store": {"frames": 30, "impact_frame": 15}
+    "store": {"frames": 30, "impact_frame": 6}
   }
 }

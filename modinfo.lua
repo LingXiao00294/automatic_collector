@@ -1,7 +1,7 @@
 name = "拾荒机 · Automatic Collector"
-description = "木制采集小车：逐个拾取、采摘和收获，集中收集同类货物后送箱子，用冲撞打开巨大作物。右键暂停/启动，重新放下可改变工作中心。"
+description = "version: 0.4.3\n拾荒机：拾取、采摘和收获，还可以敲开巨大作物。\n右键暂停/启动。"
 author = "Lingxiao00294"
-version = "0.4.0"
+version = "0.4.3"
 api_version = 10
 dst_compatible = true
 dont_starve_compatible = false

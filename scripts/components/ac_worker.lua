@@ -153,7 +153,7 @@ function Worker:Finish(action, success)
     end
     local target = self.pending.claimtarget or action.target
     Targets.Release(self, target)
-    if not success and target ~= nil and target:IsValid() then
+    if not success and not self.pending.replan and target ~= nil and target:IsValid() then
         self.cooldowns[target] = GetTime() + self.config.retry_delay
     end
     if success and (action.action == ACTIONS.PICK or action.action == ACTIONS.HARVEST) then
@@ -164,16 +164,32 @@ function Worker:Finish(action, success)
         if extra ~= nil then inventory:DropItem(extra, true) end
     end
     self.pending = nil
-    if self.inst.components.inventory ~= nil then
+    local sg = self.inst.sg
+    -- Native STORE opens the target. Successful animated delivery keeps it open
+    -- until the store state's onexit; failures and non-animated jobs close now.
+    local keep_open = success and action.action == ACTIONS.STORE
+        and sg ~= nil and sg.currentstate ~= nil and sg.currentstate.name == "store"
+    if self.inst.components.inventory ~= nil and not keep_open then
         self.inst.components.inventory:CloseAllChestContainers()
     end
     self.inst:PushEvent(success and "ac_jobsuccess" or "ac_jobfailed", { target = target, action = action })
 end
 
-function Worker:Cancel()
+function Worker:FailAction(action, replan)
+    if action == nil then return end
+    if self.pending ~= nil and self.pending.action == action and replan then
+        self.pending.replan = true
+        self.nextscan = 0
+    end
+    -- Notify native DoAction listeners as well as releasing the worker's job.
+    action:Fail()
+    self:Finish(action, false)
+end
+
+function Worker:Cancel(replan)
     if self.pending ~= nil then
         local action = self.pending.action
-        self:Finish(action, false)
+        self:FailAction(action, replan)
     end
     self.inst.components.locomotor:Stop()
     self.inst.components.locomotor:Clear()
@@ -208,8 +224,7 @@ function Worker:ValidateAction(action)
     if self.pending.kind == "store" then
         return action.invobject ~= nil and action.invobject:IsValid()
             and action.invobject.components.inventoryitem.owner == self.inst
-            and Targets.IsContainer(self, action.target)
-            and Targets.FindContainer(self, action.invobject) == action.target
+            and Targets.CanReceive(self, action.target, action.invobject)
     end
     local kind, nativeaction = Targets.Kind(self, action.target)
     if kind ~= self.pending.kind or nativeaction ~= action.action or not Targets.IsAvailable(self, action.target) then
@@ -225,6 +240,11 @@ function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
         or GetTime() - self.pending.started > self.config.action_timeout) then
         self:Cancel()
+    elseif self.pending ~= nil and self.pending.kind == "store"
+        and not self:ValidateAction(self.pending.action) then
+        -- Capacity, filters or another opener may change during the walk.
+        -- Replan immediately without penalising a container whose capacity changed.
+        self:Cancel(true)
     end
 end
 
@@ -247,14 +267,21 @@ function Worker:GetNextAction()
     else
         target, kind, action = Targets.FindWork(self)
     end
-    self:SetBlocked(cargo ~= nil and target == nil)
     if target == nil then
+        -- Native storage_robot's GoHomeAction drops one whole cargo stack at
+        -- the current position before walking home. Do not keep undeliverable
+        -- cargo aboard or discard other groups that may still have a destination.
+        if cargo ~= nil then
+            self.inst.components.inventory:DropItem(cargo, true, true)
+        end
+        self:SetBlocked(cargo ~= nil and self:GetCargo() == cargo)
         local home = self:GetHome()
-        if cargo == nil and self.inst:GetDistanceSqToPoint(home) > 1 then
+        if self.inst:GetDistanceSqToPoint(home) > 1 then
             return BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, home, nil, .5)
         end
         return nil
     end
+    self:SetBlocked(false)
     if kind ~= "store" and not Targets.Claim(self, target) then
         return nil
     end

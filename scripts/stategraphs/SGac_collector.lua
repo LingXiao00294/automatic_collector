@@ -35,7 +35,7 @@ local function WorkState(name, animation, duration, impact, sound)
                     inst.SoundEmitter:PlaySound(sound)
                     worker:PerformAction(action)
                 else
-                    if action ~= nil then action:Fail() end
+                    worker:FailAction(action, action ~= nil and action.action == ACTIONS.STORE)
                     inst:ClearBufferedAction()
                 end
             end
@@ -45,7 +45,7 @@ local function WorkState(name, animation, duration, impact, sound)
             inst.AnimState:SetDeltaTimeMultiplier(1)
             local action = inst.sg.statemem.action
             if inst.components.ac_worker.pending ~= nil and inst.components.ac_worker.pending.action == action then
-                inst.components.ac_worker:Finish(action, false)
+                inst.components.ac_worker:FailAction(action)
                 inst:ClearBufferedAction()
             end
             inst.components.inventory:CloseAllChestContainers()
@@ -56,7 +56,8 @@ end
 table.insert(states, WorkState("pickup", "pickup", 1, .5, "dontstarve/wilson/pickup_reeds"))
 table.insert(states, WorkState("pick", "hammer", 1.3, .7, "dontstarve/wilson/pickup_plants"))
 table.insert(states, WorkState("hammer", "hammer", 1.3, .7, "dontstarve/wilson/hammer"))
-table.insert(states, WorkState("store", "store", 1, .5, "dontstarve/wilson/pickup_reeds"))
+-- Native storage_robot stores on frame 6 and closes the chest on state exit.
+table.insert(states, WorkState("store", "store", 1, 6 * FRAMES, "dontstarve/wilson/pickup_reeds"))
 
 CommonStates.AddWalkStates(states, nil, { startwalk = "walk_pre", walk = "walk_loop", stopwalk = "walk_pst" })
 

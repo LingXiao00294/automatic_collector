@@ -65,6 +65,10 @@ def test_animation_runtime_contract():
                         assert x == pytest.approx(0), "Pickup sinks over the reached target"
                     if name == "hammer" and facing == 5 and frame_index == 21:
                         assert x == pytest.approx(32), "Keep the approved bumper ram contact"
+                    if name == "store" and frame_index < 6:
+                        assert y < 8, "Delivery must not reach contact before frame 6"
+                    if name == "store" and frame_index == 6:
+                        assert y == pytest.approx(8), "Native STORE must match the nod contact"
                 actual_frames += 1
                 actual_elements += elements
         assert actual_frames == total_frames == 585
@@ -119,10 +123,19 @@ def test_icons(path):
     assert (ROOT / path).with_name(texture.attrib["filename"]).read_bytes()[:4] == b"KTEX"
     elements = atlas.findall("Elements/Element")
     assert len(elements) == 1 and elements[0].attrib["name"].endswith(".tex")
+    if path == "images/inventoryimages/automatic_collector":
+        data = (ROOT / f"{path}.tex").read_bytes()
+        assert struct.unpack_from("<HH", data, 8) == (64, 64)
+        preview = Image.open(ROOT / "assets/generated/inventory_automatic_collector.png")
+        assert preview.size == (64, 64)
+        bbox = preview.getchannel("A").getbbox()
+        assert bbox is not None
+        assert bbox[2] - bbox[0] <= 48 and bbox[3] - bbox[1] <= 48
 
 
 def test_editable_source():
     spec = json.loads((ROOT / "assets/source/rig.json").read_text())
+    assert spec["animations"]["store"]["impact_frame"] / spec["fps"] == 0.2
     scml = ET.parse(ROOT / "assets/generated/automatic_collector.scml")
     animations = scml.findall("entity/animation")
     assert len(animations) == 21
