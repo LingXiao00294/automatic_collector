@@ -272,8 +272,9 @@ function M.FindWork(worker, mode, entities)
                     local rank = priority[kind] or 3
                     -- Prepare every available giant before starting a cargo group.
                     -- Once carrying, fill/deliver that group before starting new work.
-                    if empty and (kind == "hammer" or (kind == "pick"
-                        and Compat.IsGiantPlant(target))) then
+                    if empty and kind == "hammer" then
+                        rank = -2
+                    elseif empty and kind == "pick" and Compat.IsGiantPlant(target) then
                         rank = -1
                     end
                     local score = rank * 100000 + worker.inst:GetDistanceSqToInst(target)

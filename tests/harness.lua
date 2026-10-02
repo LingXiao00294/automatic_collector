@@ -152,6 +152,13 @@ local function inventory(owner)
 end
 function BufferedAction(doer, target, action, item, pos)
     local a = { doer = doer, target = target, action = action, invobject = item, pos = pos, success = {}, fail = {} }
+    a.initialtargetowner = target ~= nil and target.components.inventoryitem ~= nil
+        and target.components.inventoryitem.owner or nil
+    function a:IsValid()
+        return self.doer:IsValid() and (self.invobject == nil or self.invobject:IsValid())
+            and (self.target == nil or (self.target:IsValid() and self.initialtargetowner
+                == (self.target.components.inventoryitem ~= nil and self.target.components.inventoryitem.owner or nil)))
+    end
     function a:AddSuccessAction(fn) table.insert(self.success, fn) end
     function a:AddFailAction(fn) table.insert(self.fail, fn) end
     function a:Succeed()
@@ -341,8 +348,9 @@ function scenarios.active_watchdog_keeps_valid_target()
     assert(action.target == target and w.inst.mutations == nil)
     local active = w.task action:Fail()
     assert(active.cancelled and w.task.period == .5)
+    assert(validations == 4, "The native failure callback classifies the still-valid target once")
     advance_periodic(w.inst,.7)
-    assert(validations == 3)
+    assert(validations == 4)
 end
 
 function scenarios.active_watchdog_rechecks_work_and_capacity()
@@ -569,7 +577,91 @@ local function walk_to(w, action)
         if self.bufferedaction ~= nil then self.bufferedaction:Fail() end
         self.bufferedaction = nil
     end
+    function loco:OnUpdate()
+        if self.dest ~= nil and (not self.dest:IsValid()
+            or (self.bufferedaction ~= nil and not self.bufferedaction:IsValid())) then
+            self:Clear()
+        end
+    end
     return loco
+end
+
+function scenarios.native_failure_before_watchdog()
+    local w = setup() local first, second = item("twigs",4), item("flint",6)
+    local action = w:GetNextAction() local loco = walk_to(w,action)
+    local failures = 0 action:AddFailAction(function() failures = failures + 1 end)
+    local player = entity("wilson",4) player.components.inventory = inventory(player)
+    player.components.inventory:GiveItem(first)
+    now = FRAMES loco:OnUpdate()
+    assert(failures == 1 and w.pending == nil and loco.dest == nil and loco.bufferedaction == nil)
+    assert(not w:IsCoolingDown(first) and w.nextscan == 0 and w.task.period == .5)
+    assert(Targets.IsAvailable(worker(),first) and w.farm_count == 0)
+    player.components.inventory:RemoveItem(first)
+    local replacement = w:GetNextAction() assert(replacement.target == first)
+    advance_periodic(w.inst,.1)
+    action:Fail() action:Succeed()
+    assert(failures == 1 and w.pending.action == replacement and replacement.target ~= second)
+end
+
+function scenarios.native_failure_preserves_cargo()
+    local w = worker() local c = chest(5)
+    local cargo, drop = item("twigs",0,nil,3), item("twigs",4,nil,2)
+    w.inst.components.inventory:GiveItem(cargo)
+    local action = w:GetNextAction() local loco = walk_to(w,action)
+    local other = worker(4) other.inst.components.inventory:GiveItem(drop)
+    now = FRAMES loco:OnUpdate()
+    assert(w.pending == nil and w:GetCargo() == cargo and not w:IsCoolingDown(drop))
+    local delivery = w:GetNextAction() assert(delivery.target == c and delivery.action == ACTIONS.STORE)
+    execute(w,delivery)
+    assert(c.components.container.stored.twigs == 3 and other:GetCargo() == drop
+        and drop.components.stackable:StackSize() == 2 and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.native_failure_world_conditions()
+    local w = setup() local p = plant(2)
+    p.tags.farm_plant = true p.plant_def = {product="carrot"}
+    local action = w:GetNextAction()
+    p.components.pickable.mature = false now = FRAMES action:Fail()
+    assert(w.pending == nil and not w:IsCoolingDown(p) and w.nextscan == 0 and w.farm_count == 0)
+    local cargo = item("twigs",0,nil,3) w.inst.components.inventory:GiveItem(cargo)
+    action = w:GetNextAction()
+    action.target.components.container.capacity = 0 now = 2 * FRAMES action:Fail()
+    assert(w.pending == nil and not w:IsCoolingDown(action.target) and w.nextscan == 0
+        and w:GetCargo() == cargo and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.native_failure_timeout_and_pause()
+    local w = setup() local target = item("twigs",1)
+    local action = w:GetNextAction()
+    target.components.inventoryitem.owner = entity("wilson",1)
+    now = 21 action:Fail()
+    assert(w.pending == nil and w:IsCoolingDown(target))
+    target.components.inventoryitem.owner = nil now = 32
+    action = w:GetNextAction()
+    w:SetEnabled(false)
+    assert(w.pending == nil and w:IsCoolingDown(target) and not w:IsWorking())
+end
+
+function scenarios.giant_displaced_drop_before_next_plant()
+    local w = worker() w.config.matching_only = true
+    local first, second = plant(.9), plant(1)
+    for _, p in ipairs({first, second}) do
+        p.tags.farm_plant = true p.is_oversized = true p.plant_def = {product="carrot"}
+    end
+    local fruit
+    function first.components.pickable:Pick()
+        self.mature = false first.harvests = 1
+        fruit = giant() fruit.x = 1.3 -- Flinging can put the fruit past a neighbouring plant.
+    end
+    local action = w:GetNextAction() assert(action.target == first)
+    execute(w,action) w.inst.x = .9
+    for _ = 1, 3 do
+        action = w:GetNextAction()
+        assert(action.target == fruit and action.action == ACTIONS.AC_HAMMER
+            and second.harvests == nil and w.farm_count == 1)
+        execute(w,action)
+    end
+    assert(not fruit:IsValid() and w:GetNextAction().target == second)
 end
 
 function scenarios.pickup_stolen_en_route()

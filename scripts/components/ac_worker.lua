@@ -170,7 +170,10 @@ function Worker:PerformAction(action)
             action.target = portion
         end
     end
+    local pending = self.pending
+    pending.executing = true
     self.inst:PerformBufferedAction()
+    pending.executing = nil
 end
 
 function Worker:IsWorking()
@@ -186,6 +189,14 @@ end
 function Worker:Finish(action, success)
     if self.pending == nil or self.pending.action ~= action then
         return
+    end
+    -- Native locomotor may fail first, before the watchdog sees a changed target.
+    -- Classify here without failing/clearing the action again inside its callback.
+    if not success and not self.pending.replan and not self.pending.executing and self:IsWorking()
+        and GetTime() - self.pending.started <= self.config.action_timeout
+        and not self:ValidateAction(action) then
+        self.pending.replan = true
+        self.nextscan = 0
     end
     local target = self.pending.claimtarget or action.target
     Targets.Release(self, target)
