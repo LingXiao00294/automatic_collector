@@ -7,7 +7,8 @@
 - `modinfo.lua` 管理版本与配置；`modmain.lua` 注册配方、动作和扩展接口。
 - `scripts/` 包含 prefab、组件、Brain、StateGraph；`ac_targets.lua` 负责目标筛选，`ac_api.lua` 提供扩展注册。
 - `assets/source/` 保存原创贴图和 `rig.json`；动画曲线位于 `tools/build_assets.py`。`assets/generated/` 是构建输出，SCML 会被覆盖。
-- `anim/`、`images/` 和 `modicon.*` 是游戏资源；`tests/` 保存回归测试；`docs/` 记录接口、美术和验证。
+- `anim/`、`images/` 和 `modicon.*` 是游戏资源；`tests/` 保存回归测试。
+- README 只保留玩家说明；[开发者指南](docs/DEVELOPMENT.md) 管理工具流程，[技术报告](docs/TECHNICAL_REPORT.md) 记录实现；`docs/` 另含接口、美术和验证记录。
 - `.reference/`、`.runtime/`、`asset_work/` 和 `publish/` 均被忽略，不作为源码提交；发行输出只使用 `publish/`。
 
 作业只在 master simulation 执行；每次动作仅交互一个目标，在动画接触时重新验证。使用原版组件接口，保持物品数量守恒，避免替换原版全局行为。
@@ -43,7 +44,7 @@ pytest 通过 Lupa 执行 LuaJIT；`tests/harness.lua` 提供行为场景，`tes
 
 ## 提交与 Pull Request
 
-仓库尚无提交历史；默认不创建提交，不直接在 `main`/`master` 开发。新分支默认使用 `codex/<主题>`；用户要求提交时采用 Conventional Commits，例如 `fix: preserve partial pickup stacks`，仅纳入任务相关文件。
+默认不创建提交，不直接在 `main`/`master` 开发。新分支默认使用 `codex/<主题>`；用户要求提交时沿用 Conventional Commits，例如 `fix: preserve partial pickup stacks`，仅纳入任务相关文件。
 
 PR 描述应说明问题、最终行为、验证结果和未验证范围，关联已有问题；美术变更附预览并注明是否游戏截图。功能、配置或 API 变化同步更新 README 和相关文档；模组版本变更时同步工具项目版本，发行目录固定为 `publish/`。
 

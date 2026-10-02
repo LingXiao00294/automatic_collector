@@ -164,7 +164,12 @@ function Worker:Finish(action, success)
         if extra ~= nil then inventory:DropItem(extra, true) end
     end
     self.pending = nil
-    if self.inst.components.inventory ~= nil then
+    local sg = self.inst.sg
+    -- Native STORE opens the target. Successful animated delivery keeps it open
+    -- until the store state's onexit; failures and non-animated jobs close now.
+    local keep_open = success and action.action == ACTIONS.STORE
+        and sg ~= nil and sg.currentstate ~= nil and sg.currentstate.name == "store"
+    if self.inst.components.inventory ~= nil and not keep_open then
         self.inst.components.inventory:CloseAllChestContainers()
     end
     self.inst:PushEvent(success and "ac_jobsuccess" or "ac_jobfailed", { target = target, action = action })

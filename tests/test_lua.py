@@ -78,6 +78,13 @@ def test_lua_51_syntax():
         "batch_adapter",
         "harvest_uses_ram_animation",
         "pickup_arrives_over_item",
+        "store_open_window",
+        "store_open_speed",
+        "store_open_interrupted",
+        "store_open_cancelled_after_success",
+        "store_open_failed_preflight",
+        "store_direct_closes",
+        "store_open_failed_action",
     ],
 )
 def test_scenario(lua, scenario):

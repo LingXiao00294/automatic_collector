@@ -11,6 +11,7 @@ function Class(base, ctor)
 end
 math.clamp = function(x, a, b) return math.max(a, math.min(b, x)) end
 local now = 0
+FRAMES = 1 / 30
 GetTime = function() return now end
 function Vector3(x, y, z)
     local v = { x = x, y = y, z = z }
@@ -70,6 +71,8 @@ local function entity(prefab, x, tags)
         elseif action.action == ACTIONS.STORE then
             local cargo = self.components.inventory:RemoveItem(action.invobject)
             local container = action.target.components.container
+            -- Native STORE opens stationary containers as it transfers the item.
+            container:Open(self)
             local count = cargo.components.stackable:StackSize()
             container.stored[cargo.prefab] = (container.stored[cargo.prefab] or 0) + count
             container.capacity = container.capacity - count
@@ -83,7 +86,7 @@ local function entity(prefab, x, tags)
     return e
 end
 local function inventory(owner)
-    local inv = { owner = owner, items = {}, maxslots = 1, closes = 0 }
+    local inv = { owner = owner, items = {}, maxslots = 1, closes = 0, opencontainers = {} }
     inv.itemslots = inv.items
     function inv:GetFirstItemInAnySlot()
         for slot=1,self.maxslots do if self.items[slot] ~= nil then return self.items[slot] end end
@@ -100,7 +103,14 @@ local function inventory(owner)
         return math.min(room,count)
     end
     function inv:GetActiveItem() return self.active end
-    function inv:CloseAllChestContainers() self.closes = self.closes + 1 end
+    function inv:CloseAllChestContainers()
+        self.closes = self.closes + 1
+        for target in pairs(self.opencontainers) do
+            if target:IsValid() and target.components.container.type == "chest" then
+                target.components.container:Close(self.owner)
+            end
+        end
+    end
     function inv:GiveItem(item)
         for slot=1,self.maxslots do
             local existing = self.items[slot]
@@ -182,13 +192,22 @@ local function item(prefab, x, tags, count)
 end
 local function chest(x, has, capacity)
     local e = entity("treasurechest", x, { "_container" })
-    local c = { type = "chest", canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {} }
+    local c = { type = "chest", canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {}, openers = {} }
     function c:Has(prefab) return self.has[prefab] == true end
     function c:CanAcceptCount(it, maxcount) return math.min(self.capacity, maxcount or it.components.stackable:StackSize()) end
     function c:IsFull() return self.capacity == 0 end
     function c:IsRestricted() return self.restricted == true end
     function c:CanOpen() return self.locked ~= true end
     function c:IsOpenedByOthers() return self.open == true end
+    function c:IsOpenedBy(doer) return self.openers[doer] == true end
+    function c:Open(doer)
+        self.openers[doer] = true
+        doer.components.inventory.opencontainers[e] = true
+    end
+    function c:Close(doer)
+        self.openers[doer] = nil
+        doer.components.inventory.opencontainers[e] = nil
+    end
     e.components.container = c
     return e
 end
@@ -378,7 +397,18 @@ local function enter(w, action, name)
     w.inst.buffered = action
     w.inst.AnimState = {SetDeltaTimeMultiplier=function() end, PlayAnimation=function(_, animation) w.inst.animation = animation end}
     w.inst.SoundEmitter = {PlaySound=function() end}
-    w.inst.sg = {statemem={}, timeinstate=0, SetTimeout=function(self,t) self.timeout=t end}
+    w.inst.sg = {statemem={}, timeinstate=0, currentstate=state,
+        SetTimeout=function(self,t) self.timeout=t end,
+        GoToState=function(self,name)
+            if self.currentstate.onexit ~= nil then self.currentstate.onexit(w.inst) end
+            for _, nextstate in ipairs(states) do
+                if nextstate.name == name then
+                    self.currentstate, self.statemem, self.timeinstate = nextstate, {}, 0
+                    if nextstate.onenter ~= nil then nextstate.onenter(w.inst) end
+                    return
+                end
+            end
+        end}
     state.onenter(w.inst)
     return state
 end
@@ -651,4 +681,89 @@ function scenarios.pickup_arrives_over_item()
     assert(action.arrivedist == .15 and ACTIONS.PICKUP.distance == 1.5)
     execute(w,action)
     assert(w:GetNextAction().arrivedist == nil, "Containers retain normal arrival distance")
+end
+
+local function enter_store(speed)
+    local w = worker()
+    local c = chest(3)
+    w.inst.components.inventory:GiveItem(item("twigs",0,nil,3))
+    if speed ~= nil then w:SetActionSpeed(speed) end
+    return w, c, enter(w,w:GetNextAction(),"store")
+end
+
+function scenarios.store_open_window()
+    local w,c,state = enter_store()
+    local container = c.components.container
+    assert(not container:IsOpenedBy(w.inst))
+    w.inst.sg.timeinstate = 5 * FRAMES state.onupdate(w.inst)
+    assert(w.inst.mutations == nil and not container:IsOpenedBy(w.inst))
+    w.inst.sg.timeinstate = 6 * FRAMES state.onupdate(w.inst) state.onupdate(w.inst)
+    assert(w.inst.mutations == 1 and w.pending == nil and w:GetCargo() == nil)
+    assert(container.stored.twigs == 3 and container:IsOpenedBy(w.inst))
+    assert(w.inst.components.inventory.closes == 0)
+    w.inst.sg.timeinstate = .99 state.onupdate(w.inst)
+    assert(container:IsOpenedBy(w.inst) and w.inst.mutations == 1)
+    state.ontimeout(w.inst)
+    assert(not container:IsOpenedBy(w.inst) and w.inst.components.inventory.closes == 1)
+end
+
+function scenarios.store_open_speed()
+    local w,c,state = enter_store(2)
+    assert(w.inst.sg.timeout == .5)
+    w.inst.sg.timeinstate = .09 state.onupdate(w.inst)
+    assert(w.inst.mutations == nil)
+    w.inst.sg.timeinstate = .1 state.onupdate(w.inst)
+    assert(c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == 3)
+    w.inst.sg.timeinstate = .49 state.onupdate(w.inst)
+    assert(c.components.container:IsOpenedBy(w.inst))
+    state.ontimeout(w.inst)
+    assert(not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_interrupted()
+    local w,c,state = enter_store()
+    w.inst.sg.timeinstate = .1 state.onupdate(w.inst)
+    w:SetEnabled(false)
+    assert(w.pending == nil and w:GetCargo() ~= nil and c.components.container.stored.twigs == nil)
+    assert(not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_cancelled_after_success()
+    local w,c,state = enter_store()
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and c.components.container:IsOpenedBy(w.inst))
+    c.components.container.open = true -- Another opener must not be closed by the robot.
+    w:SetEnabled(false)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.open)
+    assert(c.components.container.stored.twigs == 3 and w.inst.mutations == 1)
+end
+
+function scenarios.store_open_failed_preflight()
+    local w,c,state = enter_store()
+    c.components.container.capacity = 0
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.inst.mutations == nil and w.pending == nil and w:GetCargo() ~= nil)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == nil)
+end
+
+function scenarios.store_direct_closes()
+    local w = worker() local c = chest(3)
+    w.inst.components.inventory:GiveItem(item("twigs",0,nil,3))
+    execute(w,w:GetNextAction())
+    assert(c.components.container.stored.twigs == 3 and not c.components.container:IsOpenedBy(w.inst))
+end
+
+function scenarios.store_open_failed_action()
+    local w,c,state = enter_store()
+    function w.inst:PerformBufferedAction()
+        -- A third-party container can reject delivery after native STORE opens it.
+        local action = self.buffered
+        action.target.components.container:Open(self)
+        action:Fail()
+        self.buffered = nil
+    end
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and w:GetCargo().components.stackable:StackSize() == 3)
+    assert(not c.components.container:IsOpenedBy(w.inst) and c.components.container.stored.twigs == nil)
+    assert(w.inst.components.inventory.closes == 1)
 end

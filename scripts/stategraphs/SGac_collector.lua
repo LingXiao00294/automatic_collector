@@ -56,7 +56,8 @@ end
 table.insert(states, WorkState("pickup", "pickup", 1, .5, "dontstarve/wilson/pickup_reeds"))
 table.insert(states, WorkState("pick", "hammer", 1.3, .7, "dontstarve/wilson/pickup_plants"))
 table.insert(states, WorkState("hammer", "hammer", 1.3, .7, "dontstarve/wilson/hammer"))
-table.insert(states, WorkState("store", "store", 1, .5, "dontstarve/wilson/pickup_reeds"))
+-- Native storage_robot stores on frame 6 and closes the chest on state exit.
+table.insert(states, WorkState("store", "store", 1, 6 * FRAMES, "dontstarve/wilson/pickup_reeds"))
 
 CommonStates.AddWalkStates(states, nil, { startwalk = "walk_pre", walk = "walk_loop", stopwalk = "walk_pst" })
 
