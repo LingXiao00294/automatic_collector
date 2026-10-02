@@ -197,9 +197,13 @@ local function item(prefab, x, tags, count)
 end
 local function chest(x, has, capacity)
     local e = entity("treasurechest", x, { "_container" })
-    local c = { type = "chest", canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {}, openers = {} }
+    local c = { type = "chest", numslots = 1, canbeopened = true, slots = {}, stored = {}, capacity = capacity or 40, has = has or {}, openers = {} }
     function c:Has(prefab) return self.has[prefab] == true end
     function c:CanAcceptCount(it, maxcount) return math.min(self.capacity, maxcount or it.components.stackable:StackSize()) end
+    function c:CanTakeItemInSlot(it, slot)
+        return not it.components.inventoryitem.canonlygoinpocket
+            and (self.itemtestfn == nil or self:itemtestfn(it, slot))
+    end
     function c:IsFull() return self.capacity == 0 end
     function c:IsRestricted() return self.restricted == true end
     function c:CanOpen() return self.locked ~= true end
@@ -640,7 +644,8 @@ function scenarios.batch_crops_with_seeds()
         execute(w,action)
         assert(w.inst.components.inventory:GetActiveItem() == nil)
     end
-    assert(w:GetCargo().components.stackable:StackSize() == 3)
+    assert(w:GetCargo() == nil and w.farm_count == 3)
+    for _=1,3 do execute(w,w:GetNextAction()) end
     execute(w,w:GetNextAction())
     assert(c.components.container.stored.carrot == 3)
     for i=1,3 do execute(w,w:GetNextAction()) end
@@ -660,7 +665,8 @@ function scenarios.batch_legacy_crops()
         end
     end
     execute(w,w:GetNextAction()) execute(w,w:GetNextAction())
-    assert(w:GetCargo().components.stackable:StackSize() == 2)
+    assert(w:GetCargo() == nil and w.farm_count == 2)
+    execute(w,w:GetNextAction()) execute(w,w:GetNextAction())
     execute(w,w:GetNextAction()) assert(c.components.container.stored.carrot == 2)
 end
 
@@ -834,11 +840,13 @@ end
 function scenarios.giant_matching_wrong_or_full_sample()
     local w = worker() w.config.matching_only = true
     local c = chest(3,{goldnugget=true})
-    giant("garlic_oversized")
-    assert(w:GetNextAction() == nil, "Unrelated samples cannot approve giant work")
+    local e = giant("garlic_oversized")
+    assert(w:GetNextAction().target == e, "Giant preparation does not predict a destination")
+    execute(w,w.pending.action)
     c.components.container.has = {garlic_seeds=true}
     c.components.container.capacity = 0 now = 1
-    assert(w:GetNextAction() == nil, "A full destination must not approve giant work")
+    assert(w:GetNextAction().target == e, "Full boxes cannot interrupt giant preparation")
+    execute(w,w.pending.action)
     c.components.container.capacity = 40 now = 2
     assert(w:GetNextAction().action == ACTIONS.AC_HAMMER)
 end
@@ -876,11 +884,15 @@ function scenarios.giant_matching_open_container()
     local c = chest(3,{garlic=true}) c.prefab = "icebox"
     local e = giant("garlic_oversized")
     c.components.container.open = true
-    assert(w:GetNextAction() == nil)
-    c.components.container.open = false now = 1
     local action = w:GetNextAction() assert(action.target == e)
+    assert(w:ValidateAction(action), "Opening a chest cannot interrupt giant preparation")
+    execute(w,action)
+    c.components.container.open = false now = now + 1
+    action = w:GetNextAction() assert(action.target == e)
     c.components.container.open = true
-    assert(not w:ValidateAction(action), "Recheck player opening at ram contact")
+    assert(w:ValidateAction(action))
+    execute(w,action) execute(w,w:GetNextAction())
+    assert(w:GetNextAction() == nil, "Pickup still waits for the player to close the chest")
 end
 
 function scenarios.delivery_full_en_route()
@@ -1055,4 +1067,557 @@ function scenarios.giant_batch_mature_plants()
     end
     action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
     execute(w,action) assert(c.components.container.stored.garlic == 4)
+end
+
+local Compat = require("ac_compat")
+local InsightCompat = require("ac_insight")
+local function mod_plant(component, data, yields, prefab)
+    local p = plant(1)
+    p.prefab = prefab or "mod_plant"
+    p.components.pickable.product = nil
+    if component ~= nil then p.components[component] = data end
+    function p.components.pickable:Pick(doer)
+        assert(self:CanBePicked())
+        self.mature = false
+        p.harvests = (p.harvests or 0) + 1
+        for _, yield in ipairs(yields or {}) do
+            doer.components.inventory:GiveItem(item(yield[1], p.x, nil, yield[2]))
+        end
+    end
+    return p
+end
+
+function scenarios.legion_soil_matching()
+    local w = worker() w.config.matching_only = true
+    local c = chest(4, {garlic=true})
+    local p = mod_plant("perennialcrop", {product="garlic",stage=4,stage_max=4,
+        num_perfect=5,pollinated=3,pollinated_max=3}, {{"garlic",4}})
+    assert(Targets.HarvestProduct(w,p,"pick") == "garlic")
+    local _, count = Targets.HarvestProduct(w,p,"pick") assert(count == 4)
+    execute(w,w:GetNextAction())
+    assert(p.harvests == 1 and w:GetCargo() == nil)
+    execute(w,w:GetNextAction())
+    execute(w,w:GetNextAction()) assert(c.components.container.stored.garlic == 4)
+end
+
+function scenarios.legion_soil_yield_changes()
+    local w = worker() local c = chest(4,{spoiled_food=true},40) w.config.matching_only = true
+    local p = mod_plant("perennialcrop", {product="garlic",stage=4,stage_max=4,
+        num_perfect=3,isrotten=true}, {{"spoiled_food",2}})
+    w.inst.components.inventory:GiveItem(item("spoiled_food",0,nil,39))
+    assert(w:GetNextAction().action == ACTIONS.STORE)
+    w:Cancel(true) w.inst.components.inventory.items[1].components.stackable.stacksize = 38
+    w.nextscan = 0 c.components.container.capacity = 39
+    assert(w:GetNextAction().action == ACTIONS.STORE, "Whole harvest must fit its destination")
+    execute(w,w.pending.action)
+    c.components.container.capacity = 0
+    assert(w:GetNextAction().target == p, "Farm harvesting does not require room for its yield")
+    execute(w,w.pending.action)
+    assert(w:GetCargo() == nil and p.harvests == 1)
+    assert(w:GetNextAction() == nil and not w.farm_draining and not w.blocked)
+end
+
+function scenarios.legion_soil_giant_priority()
+    local w = worker() w.config.matching_only = true chest(4,{garlic=true})
+    item("garlic",.1)
+    local p = mod_plant("perennialcrop", {product="garlic",product_huge="garlic_oversized",
+        stage=4,stage_max=4,ishuge=true}, {})
+    function p.components.pickable:Pick()
+        self.mature = false p.components.perennialcrop.ishuge = false
+        local e = giant("garlic_oversized") e.x = p.x
+    end
+    local action = w:GetNextAction() assert(action.target == p and action.action == ACTIONS.PICK)
+    execute(w,action)
+    action = w:GetNextAction() assert(action.action == ACTIONS.AC_HAMMER)
+    assert(p:IsValid(), "Harvest never digs up the soil")
+end
+
+function scenarios.legion_cluster_matching()
+    local w = worker() w.config.matching_only = true chest(4,{corn=true})
+    local p = mod_plant("perennialcrop2", {cropprefab="corn",stage=3,stage_max=3,
+        cluster=9,numfruit=2,pollinated=3,pollinated_max=3}, {{"corn",12}})
+    local product, count = Targets.HarvestProduct(w,p,"pick") assert(product == "corn" and count == 12)
+    execute(w,w:GetNextAction()) assert(p.harvests == 1)
+    assert(w:GetCargo() == nil)
+    local action = w:GetNextAction() assert(action.action == ACTIONS.PICKUP)
+    execute(w,action) assert(w:GetCargo().components.stackable:StackSize() == 12)
+end
+
+function scenarios.legion_cluster_custom_yield()
+    local w = worker() w.config.matching_only = true chest(4,{berries_juicy=true})
+    local p = mod_plant("perennialcrop2", {cropprefab="berries",stage=3,stage_max=4,
+        fn_loot=function() error("Do not run loot callbacks while scanning") end}, {})
+    assert(w:GetNextAction().target == p)
+    assert(Compat.HarvestInfo(p).count == nil)
+    w:Cancel() w.nextscan = 0
+    p.components.perennialcrop2.cropprefab = "mandrake"
+    p.components.perennialcrop2.isrotten = true
+    assert(Compat.HarvestInfo(p).product == "livinglog")
+    p.components.perennialcrop2.cropprefab = "log"
+    assert(Compat.HarvestInfo(p).product == "log")
+    p.components.perennialcrop2.fn_loot = nil p.components.perennialcrop2.stage = 2
+    local info = Compat.HarvestInfo(p) assert(info.product == "spoiled_food" and info.count == 1)
+    p.components.perennialcrop2.stage = 1
+    assert(#Compat.HarvestInfo(p).products == 0)
+end
+
+function scenarios.legion_monstrain_secondary_sample()
+    local w = worker() w.config.matching_only = true local c = chest(4,{monstrain_leaf=true})
+    local p = mod_plant(nil,nil,{{"squamousfruit",1},{"monstrain_leaf",1}},"monstrain")
+    execute(w,w:GetNextAction()) assert(p.harvests == 1)
+    assert(w.inst.components.inventory:GetActiveItem() == nil)
+    assert(Targets.Kind(w, w:GetCargo()) == nil, "Held products cannot be claimed")
+    -- Fruit has no matching chest: it is dropped; the matching leaf is then picked.
+    w:GetNextAction() now = now + 1
+    execute(w,w:GetNextAction()) execute(w,w:GetNextAction())
+    assert(c.components.container.stored.monstrain_leaf == 1)
+    local fruit_count = 0
+    for _, e in ipairs(entities) do
+        if e:IsValid() and e.prefab == "squamousfruit" then fruit_count = fruit_count + e.components.stackable:StackSize() end
+    end
+    assert(fruit_count == 1)
+end
+
+function scenarios.legion_secondary_yields()
+    local w = worker() w.config.matching_only = true local c = chest(4,{lance_carrot_l=true})
+    local crop = {cropprefab="carrot",stage=3,stage_max=3,cluster=50,
+        fn_loot=function() error("Scanning cannot run a custom loot callback") end}
+    local p = mod_plant("perennialcrop2",crop,{})
+    assert(w:GetNextAction().target == p)
+    w:Cancel(true) w.nextscan = 0
+    c.components.container.has = {cactus_flower=true}
+    crop.cropprefab = "cactus_meat"
+    assert(w:GetNextAction().target == p)
+    w:Cancel(true) w.nextscan = 0
+    crop.stage = 2
+    assert(w:GetNextAction().target == p, "Ready crops do not need a predicted matching yield")
+    assert(#Compat.HarvestInfo(p).products == 1)
+    w:Cancel(true) w.nextscan = 0 crop.stage = 3 crop.cropprefab = "berries"
+    c.components.container.has = {berries_juicy=true}
+    assert(w:GetNextAction().target == p)
+    w:Cancel(true) w.nextscan = 0
+    crop.cropprefab = "corn" crop.fn_loot = nil crop.isflower = true
+    c.components.container.has = {petals=true}
+    assert(w:GetNextAction().target == p)
+end
+
+function scenarios.medal_tree_random_yield()
+    local w = worker() w.config.matching_only = true chest(4,{immortal_fruit=true})
+    local p = mod_plant(nil,nil,{{"immortal_fruit",5}},"medal_fruit_tree_immortal")
+    p.tags.medal_fruit_tree = true p.fruit_tree_def = {product="immortal_fruit",productlist={.5,.5}}
+    p.tree_level = 20
+    w.inst.components.inventory:GiveItem(item("immortal_fruit",0))
+    assert(w:GetNextAction().action == ACTIONS.STORE, "Random tree yields are never predicted")
+    execute(w,w.pending.action)
+    execute(w,w:GetNextAction()) assert(p.harvests == 1)
+end
+
+function scenarios.mod_plants_contact_revalidation()
+    local w = worker() w.config.matching_only = true local c = chest(4,{corn=true})
+    local p = mod_plant("perennialcrop2", {cropprefab="corn",stage=3,stage_max=3},{{"corn",1}})
+    local state = enter(w,w:GetNextAction(),"pick")
+    p.components.pickable = nil w.inst.sg.timeinstate = .7 state.onupdate(w.inst)
+    assert(p.harvests == nil and w.inst.mutations == nil and w.pending == nil)
+    w.nextscan = 0
+    local q = mod_plant("perennialcrop", {product="corn",stage=3,stage_max=3},{{"corn",1}})
+    state = enter(w,w:GetNextAction(),"pick")
+    c.components.container.capacity = 0 w.inst.sg.timeinstate = .7 state.onupdate(w.inst)
+    assert(q.harvests == 1 and w.pending == nil and w:GetCargo() == nil)
+    w.nextscan = 0 c.components.container.capacity = 40 w.config.pick_plants = false
+    q.components.pickable.mature = true
+    assert(w:GetNextAction().action == ACTIONS.PICKUP, "Disabling harvest still permits ground pickup")
+    assert(q.harvests == 1)
+end
+
+function scenarios.special_soil_item_preserved()
+    local w = worker() w.config.matching_only = true chest(4,{siving_soil_item=true})
+    local empty_soil = entity("siving_soil",2,{"soil_legion"})
+    empty_soil.components.workable = {GetWorkAction=function() return ACTIONS.HAMMER end,CanBeWorked=function() return true end}
+    assert(Targets.Kind(w,empty_soil) == nil)
+    local soil = item("siving_soil_item",1,nil,2)
+    soil.skinname = "soil_skin" soil.moisture = 17
+    execute(w,w:GetNextAction()) assert(w:GetCargo() == soil and soil.skinname == "soil_skin" and soil.moisture == 17)
+    execute(w,w:GetNextAction()) assert(empty_soil:IsValid())
+end
+
+function scenarios.adapter_matching_sample()
+    local w = worker() w.config.matching_only = true chest(4,{corn=true})
+    local p = entity("custom_crop",1)
+    API.RegisterAdapter("known_yield", {match=function(_,t) return t == p end,
+        action=function() return ACTIONS.HARVEST end,product=function() return "corn",1 end})
+    assert(w:GetNextAction().target == p)
+end
+
+function scenarios.insight_optional_registration()
+    assert(not InsightCompat.Register(_G,"test_mod"))
+    local descriptors, prefabs = {}, {}
+    Insight = {API={V1={
+        AddComponentDescriptor=function(name,descriptor,metadata) assert(metadata.modname == "test_mod") descriptors[name] = descriptor end,
+        AddPrefabDescriptor=function(name,descriptor,metadata) assert(metadata.modname == "test_mod") prefabs[name] = descriptor end,
+    }}}
+    assert(InsightCompat.Register(_G,"test_mod"))
+    assert(descriptors.ac_worker.Describe == InsightCompat.Describe)
+    assert(prefabs.automatic_collector.OnSelect == InsightCompat.Select)
+    Insight.API.V1.AddPrefabDescriptor = nil
+    assert(not InsightCompat.Register(_G,"test_mod"))
+end
+
+function scenarios.insight_worker_information()
+    STRINGS = {NAMES={CORN="玉米"}}
+    local w = worker() w.config.matching_only = true
+    local function description() return InsightCompat.Describe(w).description end
+    assert(description():find("待机") and description():find("工作半径：12") and description():find("空载"))
+    assert(description():find("采摘 0/5"))
+    w.farm_draining = true assert(description():find("农作物批次：拾取与运输"))
+    w.farm_draining = false
+    w.inst.components.inventory:GiveItem(item("corn",0,nil,7))
+    assert(description():find("玉米 × 7") and description():find("仅已有同类样品"))
+    w:SetEnabled(false) assert(description():find("已暂停"))
+    w.inst.held = true assert(description():find("已收起"))
+    w.inst.held = false w:SetEnabled(true) w.inst.asleep = true assert(description():find("休眠"))
+end
+
+local function range_nets(w)
+    for _, name in ipairs({"home_valid","home_x","home_z","home_platform","radius"}) do
+        w.inst["_ac_"..name] = {set=function(self,v) self.v=v end,value=function(self) return self.v end}
+    end
+    w:SyncHome()
+end
+local function range_runtime()
+    TheNet = {IsDedicated=function() return false end}
+    function CreateEntity()
+        local anchor = entity("local_anchor",0)
+        anchor.entity = {AddTransform=function() end,SetCanSleep=function() end}
+        function anchor:AddTag(tag) self.tags[tag] = true end
+        function anchor:Remove() self.valid = false end
+        return anchor
+    end
+    function SpawnPrefab(name)
+        assert(name == "insight_range_indicator")
+        local ring = entity(name,0)
+        function ring:Attach(anchor) self.anchor = anchor end
+        function ring:SetRadius(radius) self.radius = radius end
+        function ring:SetColour() end
+        function ring:SetVisible(value) self.visible = value end
+        function ring:Remove() self.valid = false end
+        return ring
+    end
+end
+local function range_events(inst)
+    function inst:ListenForEvent(name,callback) self.listener = callback end
+    function inst:RemoveEventCallback(name,callback) assert(self.listener == callback) self.listener = nil end
+    function inst:DoPeriodicTask(_,callback)
+        self.range_update = callback
+        return {Cancel=function() inst.range_cancelled = true end}
+    end
+end
+
+function scenarios.insight_home_range_lifecycle()
+    range_runtime()
+    local w = worker(3) range_nets(w) range_events(w.inst)
+    w.inst.x = 10
+    InsightCompat.Select(w.inst)
+    local ring, anchor = w.inst._ac_range_indicator,w.inst._ac_range_anchor
+    assert(anchor.x == 3 and ring.radius == 3 and ring.visible)
+    w:SetEnabled(false) w.inst.x = 11 w.inst.range_update(w.inst)
+    assert(anchor.x == 3 and ring.visible, "Pause preserves the work centre")
+    w:OnPickup(nil) w.inst.range_update(w.inst) assert(not ring.visible)
+    w.inst.x = 7 w:OnDropped() w.inst.range_update(w.inst)
+    assert(anchor.x == 7 and ring.visible)
+    w.inst.tags.INLIMBO = true w.inst.range_update(w.inst) assert(not ring.visible)
+    w.inst.tags.INLIMBO = nil
+    w.inst.listener(w.inst)
+    assert(not anchor:IsValid() and not ring:IsValid() and w.inst.range_cancelled)
+    assert(w.inst._ac_range_task == nil and w.inst.listener == nil)
+    InsightCompat.Unselect(w.inst)
+    TheNet.IsDedicated = function() return true end
+    InsightCompat.Select(w.inst) assert(w.inst._ac_range_indicator == nil)
+end
+
+function scenarios.insight_boat_save_range()
+    range_runtime()
+    local w = worker(4) range_nets(w)
+    local boat = entity("boat",0) boat.GUID = 123
+    boat.entity = {WorldToLocalSpace=function(_,x,y,z) return x-boat.x,y,z end,
+        LocalToWorldSpace=function(_,x,y,z) return x+boat.x,y,z+boat.z end}
+    w.inst.platform = boat w:SetHome()
+    local data = w:OnSave()
+    local restored = worker() range_nets(restored) range_events(restored.inst)
+    restored:OnLoad(data) restored:LoadPostPass({[123]={entity=boat}},data)
+    InsightCompat.Select(restored.inst)
+    boat.x,boat.z = 20,5 restored.inst.range_update(restored.inst)
+    assert(restored.inst._ac_range_anchor.x == 24 and restored.inst._ac_range_anchor.z == 5)
+    assert(restored.inst._ac_home_platform:value() == boat and restored.inst._ac_home_x:value() == 4)
+    InsightCompat.Unselect(restored.inst)
+end
+
+local function farm_crop(x, product, count)
+    local p = plant(x)
+    p.tags.farm_plant = true p.plant_def = {product=product or "carrot"}
+    p.components.pickable.product = nil
+    p.components.pickable.numtoharvest = count or 1
+    return p
+end
+
+function scenarios.farm_five_then_drain_resume()
+    local w = worker() w.config.matching_only = true local c = chest(5,{carrot=true})
+    local crops = {}
+    for i=1,7 do crops[i] = farm_crop(i/2) end
+    for i=1,5 do
+        local action = w:GetNextAction()
+        assert(action.target == crops[i] and action.action == ACTIONS.PICK)
+        execute(w,action)
+        assert(w.farm_count == i and w:GetCargo() == nil)
+    end
+    assert(w.farm_draining)
+    for _=1,5 do
+        local action = w:GetNextAction() assert(action.action == ACTIONS.PICKUP)
+        execute(w,action)
+        assert(crops[6].harvests == nil and w.farm_draining)
+    end
+    local delivery = w:GetNextAction() assert(delivery.action == ACTIONS.STORE)
+    execute(w,delivery) assert(c.components.container.stored.carrot == 5)
+    local next_crop = w:GetNextAction() assert(next_crop.target == crops[6] and not w.farm_draining)
+    execute(w,next_crop) assert(w.farm_count == 1)
+end
+
+function scenarios.farm_pinecone_hammer_priority()
+    local w = worker() w.config.matching_only = true local c = chest(5,{pinecone=true})
+    local crops = {}
+    for i=1,6 do
+        local p = farm_crop(i/2,"pineananas")
+        p.is_oversized = true
+        function p.components.pickable:Pick(doer)
+            self.mature = false p.harvests = 1
+            p.fruit = giant("pineananas_oversized") p.fruit.x = p.x
+            -- The actual side yield may be handed to the picker rather than flung.
+            doer.components.inventory:GiveItem(item("pinecone",p.x))
+        end
+        crops[i] = p
+    end
+    for i=1,5 do
+        local action = w:GetNextAction() assert(action.target == crops[i] and action.action == ACTIONS.PICK)
+        execute(w,action)
+        for _=1,3 do
+            action = w:GetNextAction()
+            assert(action.target == crops[i].fruit and action.action == ACTIONS.AC_HAMMER)
+            execute(w,action) assert(w.farm_count == i and w:GetCargo() == nil)
+        end
+        assert(not crops[i].fruit:IsValid())
+    end
+    assert(w.farm_draining and crops[6].harvests == nil)
+    for _=1,5 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.PICKUP and action.target.prefab == "pinecone")
+        execute(w,action)
+    end
+    execute(w,w:GetNextAction()) assert(c.components.container.stored.pinecone == 5)
+    assert(w:GetNextAction().target == crops[6])
+end
+
+function scenarios.farm_large_yield_without_preflight()
+    local w = worker() w.config.matching_only = true local c = chest(5,{corn=true},0)
+    local p = mod_plant("perennialcrop", {product="corn",stage=3,stage_max=3},{{"corn",90}})
+    local action = w:GetNextAction() assert(action.target == p)
+    execute(w,action) assert(p.harvests == 1 and w:GetCargo() == nil)
+    assert(w:GetNextAction() == nil and not w.farm_draining and not w.blocked)
+    local total = 0
+    for _, e in ipairs(entities) do
+        if e:IsValid() and e.prefab == "corn" then total = total + e.components.stackable:StackSize() end
+    end
+    assert(total == 90, "Large native yields must remain intact on the ground")
+    c.components.container.capacity = 100 now = now + 1
+    for _, count in ipairs({40,40,10}) do
+        execute(w,w:GetNextAction()) assert(w:GetCargo().components.stackable:StackSize() == count)
+        execute(w,w:GetNextAction())
+    end
+    assert(c.components.container.stored.corn == 90 and w:GetNextAction() == nil and not w.farm_draining)
+end
+
+function scenarios.farm_skips_unavailable_cargo()
+    local w = worker() w.config.matching_only = true local c = chest(5,{carrot=true},0)
+    local crops = {}
+    for i=1,6 do crops[i] = farm_crop(i/2) end
+    for _=1,5 do execute(w,w:GetNextAction()) end
+    local other = worker()
+    local function resumes()
+        assert(w:GetNextAction().target == crops[6])
+        assert(not w.blocked and not w.farm_draining and w.farm_count == 0)
+        w:Cancel(true) w.nextscan = 0 w.farm_draining = true w.farm_count = 5
+    end
+    resumes() -- Full matching chest.
+    c.components.container.capacity = 40 c.components.container.open = true
+    resumes() -- Another opener makes the chest temporarily unavailable.
+    c.components.container.open = false c.components.container.locked = true
+    resumes()
+    c.components.container.locked = false
+    w.cooldowns[c] = now + 10
+    resumes() -- Failed delivery container still cooling down.
+    w.cooldowns[c] = nil
+    for _, e in ipairs(entities) do
+        if e.prefab == "carrot" then assert(Targets.Claim(other,e)) end
+    end
+    local action = w:GetNextAction()
+    assert(action.target == crops[6] and not w.blocked and not w.farm_draining)
+    execute(w,action)
+    for _, e in ipairs(entities) do Targets.Release(other,e) end
+    for _=1,6 do execute(w,w:GetNextAction()) end
+    execute(w,w:GetNextAction())
+    assert(c.components.container.stored.carrot == 6 and not w.blocked)
+end
+
+function scenarios.farm_unmatched_and_filtered_cargo()
+    local w = worker() w.config.matching_only = true local c = chest(5,{garlic=true})
+    local crops = {}
+    for i=1,6 do crops[i] = farm_crop(i/2,"carrot") end
+    for _=1,5 do execute(w,w:GetNextAction()) end
+    assert(w:GetNextAction().target == crops[6], "Unmatched drops do not hold the interruption open")
+    w:Cancel(true) w.nextscan = 0 w.farm_draining = true
+    c.components.container.has = {carrot=true}
+    c.components.container.numslots = 1
+    c.components.container.itemtestfn = function() return false end
+    c.components.container.CanAcceptCount = function() return 0 end
+    assert(w:GetNextAction().target == crops[6], "Container filters also apply to interruption completion")
+    w:Cancel(true) w.nextscan = 0 w.farm_draining = true
+    c.components.container.itemtestfn = nil
+    for _, e in ipairs(entities) do
+        if e.prefab == "carrot" then e.components.inventoryitem.canonlygoinpocket = true end
+    end
+    assert(w:GetNextAction().target == crops[6], "Native item storage restrictions do not stall a batch")
+end
+
+function scenarios.farm_gift_fruit_mixed_drops_resume()
+    local w = worker() w.config.matching_only = true
+    local c = chest(5,{carrot=true,twigs=true})
+    local full = chest(6,{berries=true},0)
+    local filtered = chest(7,{medal_gift_fruit_seed=true})
+    filtered.components.container.CanAcceptCount = function() return 0 end
+    for i=1,4 do farm_crop(i/2,"corn") end
+    for _=1,4 do execute(w,w:GetNextAction()) end
+    local p = farm_crop(2.5,"medal_gift_fruit") p.is_oversized = true
+    function p.components.pickable:Pick()
+        self.mature = false p.harvests = 1
+        p.fruit = giant("medal_gift_fruit_oversized") p.fruit.x = p.x
+        -- Model the giant gift fruit's random mixed gifts, including unmatched loot.
+        p.fruit.components.lootdropper.loot = {"carrot","twigs","berries",
+            "medal_gift_fruit_seed","goldnugget","carrot","twigs","berries",
+            "medal_gift_fruit_seed","goldnugget","carrot"}
+    end
+    local next_crop = farm_crop(3)
+    execute(w,w:GetNextAction())
+    assert(w.farm_draining)
+    prepare_giants(w,3) -- Fifth harvested crop is still hammered before any pickup.
+    assert(not p.fruit:IsValid())
+    for _=1,7 do
+        local action = w:GetNextAction()
+        assert(action.action == ACTIONS.PICKUP or action.action == ACTIONS.STORE)
+        if action.action == ACTIONS.PICKUP then
+            assert(action.target.prefab == "carrot" or action.target.prefab == "twigs")
+        end
+        execute(w,action)
+    end
+    assert(c.components.container.stored.carrot == 3 and c.components.container.stored.twigs == 2)
+    local action = w:GetNextAction()
+    assert(action.target == next_crop and not w.farm_draining and not w.blocked)
+    execute(w,action)
+    local ground = {}
+    for _, e in ipairs(entities) do
+        if e:IsValid() and Targets.Kind(w,e) == "pickup" then
+            ground[e.prefab] = (ground[e.prefab] or 0) + e.components.stackable:StackSize()
+        end
+    end
+    assert(ground.corn == 4 and ground.berries == 2 and ground.medal_gift_fruit_seed == 2
+        and ground.goldnugget == 2 and ground.carrot == 1 and ground.twigs == nil)
+    assert(full.components.container.stored.berries == nil
+        and filtered.components.container.stored.medal_gift_fruit_seed == nil)
+    full.components.container.capacity = 40
+    for _=1,5 do execute(w,w:GetNextAction()) end
+    assert(full.components.container.stored.berries == 2 and c.components.container.stored.carrot == 4)
+    assert(w:GetNextAction() == nil and not w.blocked and not w.farm_draining)
+end
+
+function scenarios.farm_restored_drain_without_receiver()
+    local w = worker() w.config.matching_only = true
+    local drop = item("carrot",1,nil,5)
+    local p = farm_crop(2)
+    w:OnLoad({enabled=true,farm_count=5,farm_draining=true})
+    w:SetBlocked(true) -- Recover an interrupted batch saved by the previous version.
+    local action = w:GetNextAction()
+    assert(action.target == p and not w.farm_draining and not w.blocked)
+    execute(w,action)
+    assert(drop:IsValid() and drop.components.inventoryitem.owner == nil
+        and drop.components.stackable:StackSize() == 5)
+    assert(w:GetNextAction() == nil and not w.farm_draining and not w.blocked)
+    plant(3) chest(5,{cutgrass=true}) now = now + 1
+    assert(w:GetNextAction().action == ACTIONS.PICK, "Skipped cargo must not block ordinary work")
+end
+
+function scenarios.farm_delivery_loses_receiver_resumes()
+    local w = worker() w.config.matching_only = true
+    local c = chest(5,{carrot=true})
+    local drop = item("carrot",1,nil,5) local p = farm_crop(2)
+    w.farm_count = 5 w.farm_draining = true
+    execute(w,w:GetNextAction()) assert(w:GetCargo() == drop)
+    local delivery = w:GetNextAction() assert(delivery.action == ACTIONS.STORE)
+    c.components.container.capacity = 0 now = now + .5 w:Watchdog()
+    assert(w.pending == nil)
+    assert(w:GetNextAction() == nil and w:GetCargo() == nil and not w.blocked)
+    now = now + 1
+    local action = w:GetNextAction()
+    assert(action.target == p and not w.farm_draining and not w.blocked)
+    assert(drop:IsValid() and drop.components.inventoryitem.owner == nil
+        and drop.components.stackable:StackSize() == 5)
+    execute(w,action)
+    assert(#w.inst.components.inventory.drops == 2) -- Cargo and the next crop's actual yield.
+end
+
+function scenarios.farm_success_count_and_contact_safety()
+    local w = worker() local crops = {}
+    for i=1,6 do crops[i] = farm_crop(i/2) end
+    for _=1,4 do execute(w,w:GetNextAction()) end
+    local action = w:GetNextAction()
+    local state = enter(w,action,"pick")
+    action.target.components.pickable.mature = false
+    w.inst.sg.timeinstate = .7 state.onupdate(w.inst)
+    assert(w.farm_count == 4 and not w.farm_draining and crops[5].harvests == nil)
+    state.ontimeout(w.inst) now = now + 1
+    action = w:GetNextAction() assert(action.target == crops[6])
+    execute(w,action) assert(w.farm_count == 5 and w.farm_draining)
+    action:Succeed() assert(w.farm_count == 5, "Duplicate completion must not count twice")
+end
+
+function scenarios.farm_partial_failure_preserves_products()
+    local w = worker() local p = farm_crop(1)
+    local action = w:GetNextAction()
+    function w.inst:PerformBufferedAction()
+        self.components.inventory:GiveItem(item("carrot",0,nil,2))
+        action:Fail() self.buffered = nil
+    end
+    w.inst.buffered = action w:PerformAction(action)
+    assert(w.farm_count == 0 and not w.farm_draining and w:GetCargo() == nil)
+    local total = 0
+    for _, e in ipairs(entities) do
+        if e:IsValid() and e.prefab == "carrot" then total = total + e.components.stackable:StackSize() end
+    end
+    assert(total == 2 and w:IsCoolingDown(p))
+end
+
+function scenarios.farm_pause_save_restore_and_relocate()
+    local w = worker() chest(5)
+    for i=1,6 do farm_crop(i/2) end
+    for _=1,2 do execute(w,w:GetNextAction()) end
+    w:SetEnabled(false) assert(w:GetNextAction() == nil and w.farm_count == 2)
+    local data = w:OnSave() local restored = worker()
+    restored:OnLoad(data) assert(not restored.enabled and restored.farm_count == 2)
+    restored:SetEnabled(true)
+    for _=1,3 do execute(restored,restored:GetNextAction()) end
+    assert(restored.farm_count == 5 and restored.farm_draining)
+    data = restored:OnSave() local draining = worker()
+    draining:OnLoad(data)
+    assert(draining.farm_draining and draining:GetNextAction().action == ACTIONS.PICKUP)
+    draining:Cancel(true)
+    draining:OnPickup(nil) assert(draining.farm_count == 0 and not draining.farm_draining)
+    draining:OnDropped() assert(draining.farm_count == 0 and not draining.farm_draining)
+    local legacy = worker() legacy:OnLoad({enabled=true})
+    assert(legacy.farm_count == 0 and not legacy.farm_draining)
 end
