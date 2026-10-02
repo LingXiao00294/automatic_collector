@@ -35,7 +35,7 @@ local function WorkState(name, animation, duration, impact, sound)
                     inst.SoundEmitter:PlaySound(sound)
                     worker:PerformAction(action)
                 else
-                    if action ~= nil then action:Fail() end
+                    worker:FailAction(action, action ~= nil and action.action == ACTIONS.STORE)
                     inst:ClearBufferedAction()
                 end
             end
@@ -45,7 +45,7 @@ local function WorkState(name, animation, duration, impact, sound)
             inst.AnimState:SetDeltaTimeMultiplier(1)
             local action = inst.sg.statemem.action
             if inst.components.ac_worker.pending ~= nil and inst.components.ac_worker.pending.action == action then
-                inst.components.ac_worker:Finish(action, false)
+                inst.components.ac_worker:FailAction(action)
                 inst:ClearBufferedAction()
             end
             inst.components.inventory:CloseAllChestContainers()

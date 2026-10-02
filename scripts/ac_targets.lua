@@ -98,18 +98,23 @@ function M.IsContainer(worker, target)
     return true
 end
 
+function M.CanReceive(worker, target, item, requiredcount)
+    if not M.IsContainer(worker, target) then return false end
+    local container = target.components.container
+    local count = requiredcount or (item.components.stackable ~= nil and item.components.stackable:StackSize() or 1)
+    return (not worker.config.matching_only or container:Has(item.prefab, 1))
+        and container:CanAcceptCount(item, count) >= count
+end
+
 function M.FindContainer(worker, item, requiredcount)
     local best, bestscore
     for _, target in ipairs(M.GetContainers(worker)) do
-        if M.IsContainer(worker, target) and not worker:IsCoolingDown(target) then
+        if not worker:IsCoolingDown(target) and M.CanReceive(worker, target, item, requiredcount) then
             local container = target.components.container
             local matching = container:Has(item.prefab, 1)
-            local count = requiredcount or (item.components.stackable ~= nil and item.components.stackable:StackSize() or 1)
-            if (matching or not worker.config.matching_only) and container:CanAcceptCount(item, count) >= count then
-                local score = (matching and 0 or 100000) + worker.inst:GetDistanceSqToInst(target)
-                if bestscore == nil or score < bestscore then
-                    best, bestscore = target, score
-                end
+            local score = (matching and 0 or 100000) + worker.inst:GetDistanceSqToInst(target)
+            if bestscore == nil or score < bestscore then
+                best, bestscore = target, score
             end
         end
     end
@@ -196,10 +201,11 @@ function M.HasHarvestDestination(worker, target)
             local c = chest.components.container
             local matches = not worker.config.matching_only
             if not matches and #products > 0 then
-                matches = true
+                -- Ground loot is collected and delivered in separate groups.
+                -- One known product sample suffices; others may stay on the ground.
                 for _, product in ipairs(products) do
-                    if not c:Has(product, 1) then
-                        matches = false
+                    if c:Has(product, 1) then
+                        matches = true
                         break
                     end
                 end
@@ -227,6 +233,7 @@ function M.FindWork(worker)
     local x, y, z = worker:GetHome():Get()
     local best, bestkind, bestaction, bestscore
     local priority = { pickup = 0, hammer = 1, pick = 2, harvest = 2 }
+    local empty = worker:GetCargo() == nil
     for _, target in ipairs(TheSim:FindEntities(x, y, z, worker.radius + 2, nil, EXCLUDE)) do
         if M.IsAvailable(worker, target) and not worker:IsCoolingDown(target) then
             local kind, action = M.Kind(worker, target)
@@ -234,7 +241,14 @@ function M.FindWork(worker)
                 local destination = kind == "pickup" and worker:GetPickupCount(target) > 0
                     or kind ~= "pickup" and worker:CanHarvest(target, kind)
                 if destination then
-                    local score = (priority[kind] or 3) * 100000 + worker.inst:GetDistanceSqToInst(target)
+                    local rank = priority[kind] or 3
+                    -- Prepare every available giant before starting a cargo group.
+                    -- Once carrying, fill/deliver that group before starting new work.
+                    if empty and (kind == "hammer" or (kind == "pick"
+                        and target:HasTag("farm_plant") and target.is_oversized)) then
+                        rank = -1
+                    end
+                    local score = rank * 100000 + worker.inst:GetDistanceSqToInst(target)
                     if bestscore == nil or score < bestscore then
                         best, bestkind, bestaction, bestscore = target, kind, action, score
                     end

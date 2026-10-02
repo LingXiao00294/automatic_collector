@@ -2,6 +2,6 @@
 <Atlas>
   <Texture filename="automatic_collector.tex" />
   <Elements>
-    <Element name="automatic_collector.tex" u1="0.00390625" u2="0.99609375" v1="0.00390625" v2="0.99609375" />
+    <Element name="automatic_collector.tex" u1="0.0078125" u2="0.9921875" v1="0.0078125" v2="0.9921875" />
   </Elements>
 </Atlas>
