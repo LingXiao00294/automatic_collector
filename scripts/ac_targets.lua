@@ -70,13 +70,8 @@ function M.Kind(worker, target)
     if target.components.crop ~= nil and target.components.crop.matured then
         return "harvest", ACTIONS.HARVEST
     end
-    -- Stable adapter ordering makes behaviour independent of Lua hash iteration order.
-    local names = {}
-    for name in pairs(API.adapters) do
-        table.insert(names, name)
-    end
-    table.sort(names)
-    for _, name in ipairs(names) do
+    -- Registration maintains stable ordering; candidate scans reuse it without sorting.
+    for _, name in ipairs(API.GetAdapterNames()) do
         local adapter = API.adapters[name]
         if adapter.match(worker.inst, target) then
             return "adapter:" .. name, adapter.action(worker.inst, target)

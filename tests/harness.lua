@@ -535,6 +535,72 @@ function scenarios.adapter()
     API.RegisterAdapter("mod_crop", {match=function(_,t) return t == e end, action=function() return ACTIONS.HARVEST end})
     assert(w:GetNextAction().action == ACTIONS.HARVEST)
 end
+function scenarios.adapter_scans_do_not_sort_names()
+    local w = worker()
+    local candidates = {}
+    for i = 1, 100 do candidates[i] = entity("unmatched_scenery", i / 100) end
+    local original_sort, sort_calls = table.sort, 0
+    table.sort = function(...)
+        sort_calls = sort_calls + 1
+        return original_sort(...)
+    end
+    -- Even the empty registry must not allocate and sort per candidate.
+    for _, target in ipairs(candidates) do Targets.Kind(w, target) end
+    local empty_calls = sort_calls
+    table.sort = original_sort
+    for i = 1, 12 do
+        API.RegisterAdapter(string.format("adapter_%02d", 13 - i), {
+            match = function() return false end, action = function() return ACTIONS.PICK end,
+        })
+    end
+    sort_calls = 0
+    table.sort = function(...)
+        sort_calls = sort_calls + 1
+        return original_sort(...)
+    end
+    w:GetNextAction() -- Both farm and normal passes scan the same candidates.
+    for _, target in ipairs(candidates) do Targets.Kind(w, target) end
+    table.sort = original_sort
+    assert(empty_calls == 0, "Empty adapter scans must not sort names")
+    assert(sort_calls == 0, "Candidate scans must reuse registration-time adapter ordering")
+end
+
+function scenarios.adapter_order_overwrite_and_late_registration()
+    local w = worker()
+    local target = entity("mod_resource", 1)
+    local visits = {}
+    local function adapter(name, matches, action)
+        return { match = function()
+            table.insert(visits, name)
+            return matches
+        end, action = function() return action or ACTIONS.PICK end }
+    end
+    API.RegisterAdapter("z_last", adapter("z_last", true))
+    API.RegisterAdapter("a_first", adapter("a_first", true))
+    local kind = Targets.Kind(w, target)
+    assert(kind == "adapter:a_first" and table.concat(visits, ",") == "a_first")
+    -- Replacing a name takes effect immediately without leaving a duplicate handler.
+    API.RegisterAdapter("a_first", adapter("a_first", false))
+    visits = {}
+    assert(Targets.Kind(w, target) == "adapter:z_last")
+    assert(table.concat(visits, ",") == "a_first,z_last")
+    -- Registrations after earlier scans must update the shared ordering.
+    API.RegisterAdapter("m_middle", adapter("m_middle", true, ACTIONS.HARVEST))
+    visits = {}
+    local action
+    kind, action = Targets.Kind(w, target)
+    assert(kind == "adapter:m_middle" and action == ACTIONS.HARVEST)
+    assert(table.concat(visits, ",") == "a_first,m_middle")
+    assert(not pcall(API.RegisterAdapter, "bad_adapter", { match = function() return true end }))
+    visits = {}
+    assert(Targets.Kind(w, target) == "adapter:m_middle")
+    assert(table.concat(visits, ",") == "a_first,m_middle")
+    -- The existing native priority and harvest configuration still precede adapters.
+    visits = {}
+    assert(Targets.Kind(w, item("twigs", 1)) == "pickup" and #visits == 0)
+    w.config.pick_plants = false
+    assert(Targets.Kind(w, target) == nil and #visits == 0)
+end
 function scenarios.scan_cost()
     local w = setup() for i=1,30 do item("twigs",1+i/100) end
     w:GetNextAction() assert(scans == 2, "Scan containers once per selection")

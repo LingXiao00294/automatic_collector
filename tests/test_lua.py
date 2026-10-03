@@ -68,6 +68,8 @@ def test_lua_51_syntax():
         "unknown_upgrade",
         "upgrades",
         "adapter",
+        "adapter_scans_do_not_sort_names",
+        "adapter_order_overwrite_and_late_registration",
         "scan_cost",
         "impact_once",
         "impact_cancelled",
