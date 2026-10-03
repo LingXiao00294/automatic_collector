@@ -19,8 +19,12 @@ end
 
 function Upgrades.Apply(inst, level)
     local advanced = level > 0
-    inst.components.ac_worker:SetMoveSpeed(advanced and 2 or 1)
-    inst.components.ac_worker:SetActionSpeed(1)
+    local worker = inst.components.ac_worker
+    worker:SetMoveSpeed(advanced and 2 or 1)
+    worker:SetActionSpeed(1)
+    worker.radius = advanced and 20 or worker.config.radius
+    worker._containercache = nil
+    worker:SyncHome()
     inst._ac_mk2:set(advanced)
     Upgrades.RefreshVisual(inst)
     local name = advanced and "automatic_collector_mk2" or "automatic_collector"

@@ -41,6 +41,7 @@ function UpgradeItem:Install(doer, target)
     local locomotor = target.components.locomotor
     local old_move = locomotor.walkspeed
     local old_action = worker.action_speed
+    local old_radius = worker.radius
     local old_applied = upgrade.applied[Upgrades.CHASSIS]
     local portion, applied
     -- One synchronous commit; never yield between detaching one item and applying the level.
@@ -80,6 +81,9 @@ function UpgradeItem:Install(doer, target)
             end
             locomotor.walkspeed = old_move
             worker.action_speed = old_action
+            worker.radius = old_radius
+            worker._containercache = nil
+            if target:IsValid() then worker:SyncHome() end
         end
         if portion ~= nil and portion:IsValid() and not portion.components.inventoryitem:IsHeld() then
             -- Native inventory returns leftovers to the ground if no slot is available.

@@ -4,7 +4,7 @@
 
 ## 升级
 
-0.6.0 内置注册 `ac_chassis_mk2`，`maxlevel = 1`。套件通过服务端 `ac_upgradeitem:Install(doer, target)` 安装；不要仅以 `SetLevel` 的返回值判断首次成功，该接口接受重复同等级设置。内置等级 1 绝对设置移速倍率 2、作业倍率 1，等级 0 恢复倍率 1；加载与重复应用不累乘。其他速度扩展若覆盖同一接口，需要自行合并。
+0.6.0 内置注册 `ac_chassis_mk2`，`maxlevel = 1`。套件通过服务端 `ac_upgradeitem:Install(doer, target)` 安装；不要仅以 `SetLevel` 的返回值判断首次成功，该接口接受重复同等级设置。内置等级 1 绝对设置移速倍率 2、作业倍率 1，等级 0 恢复倍率 1；加载与重复应用不累乘。0.6.1 将等级 1 的工作半径固定为 20，等级 0 恢复服务器配置半径；应用时清除接收箱缓存并同步 `_ac_radius`，安装失败恢复升级前半径。其他速度或范围扩展若覆盖同一字段，需要自行合并。
 
 `_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端仅据此刷新 bank、build、地图图标及显示名；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。仍使用 `automatic_collector` prefab，升级不会替换实体。
 

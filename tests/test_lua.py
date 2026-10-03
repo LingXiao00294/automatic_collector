@@ -17,6 +17,7 @@ def lua():
     runtime.execute((ROOT / "tests/harness.lua").read_text(encoding="utf-8"))
     runtime.globals().TEST_ROOT = ROOT.as_posix()
     runtime.execute((ROOT / "tests/harness_upgrade.lua").read_text(encoding="utf-8"))
+    runtime.execute((ROOT / "tests/harness_sounds.lua").read_text(encoding="utf-8"))
     return runtime
 
 
@@ -70,6 +71,9 @@ def test_lua_51_syntax():
         "adapter",
         "adapter_scans_do_not_sort_names",
         "adapter_order_overwrite_and_late_registration",
+        "sound_walk_continuous_and_cancelled",
+        "sound_work_contact_and_profiles",
+        "sound_signals_skip_held_and_sleeping",
         "scan_cost",
         "impact_once",
         "impact_cancelled",
@@ -150,6 +154,8 @@ def test_lua_51_syntax():
         "upgrade_two_players_and_reentry",
         "upgrade_invalid_or_interrupted",
         "upgrade_apply_rollback",
+        "upgrade_radius_targets_and_delivery",
+        "upgrade_radius_config_save_and_display",
         "upgrade_consumption_rollback",
         "upgrade_detach_failure_and_cancel_recheck",
         "upgrade_removed_during_apply_returns_kit",

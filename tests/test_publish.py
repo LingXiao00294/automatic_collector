@@ -24,6 +24,8 @@ def repository(tmp_path: Path) -> Path:
         "images/inventoryimages/automatic_collector.tex": "KTEX",
         "images/inventoryimages/ac_upgrade_kit.tex": "KTEX kit",
         "images/map_icons/automatic_collector_mk2.tex": "KTEX upgraded map icon",
+        "sound/ac_collector.fsb": "Original collector audio samples",
+        "sound/ac_collector.fev": "Original collector audio events",
         "docs/API.md": "Must not ship",
         "docs/engine.log": "Must not ship",
         "docs/notes.txt": "Must not ship",
@@ -55,6 +57,8 @@ def test_publish_copies_only_release_files(repository: Path):
         "images/inventoryimages/automatic_collector.tex",
         "images/inventoryimages/ac_upgrade_kit.tex",
         "images/map_icons/automatic_collector_mk2.tex",
+        "sound/ac_collector.fsb",
+        "sound/ac_collector.fev",
     }
     actual = {path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()}
     assert actual == expected

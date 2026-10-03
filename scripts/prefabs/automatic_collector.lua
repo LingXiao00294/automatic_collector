@@ -1,5 +1,6 @@
 local brain = require("brains/ac_collectorbrain")
 local Upgrades = require("ac_upgrades")
+local Sounds = require("ac_sounds")
 local assets = {
     Asset("ANIM", "anim/automatic_collector.zip"),
     Asset("ANIM", "anim/automatic_collector_mk2.zip"),
@@ -10,6 +11,7 @@ local assets = {
 }
 
 local function OnPickup(inst, owner)
+    Sounds.StopWalk(inst)
     inst.components.ac_worker:OnPickup(owner)
 end
 
@@ -24,6 +26,7 @@ local function GetStatus(inst)
 end
 
 local function OnRemove(inst)
+    Sounds.StopWalk(inst)
     inst.components.inventory:DropEverything()
 end
 
@@ -86,6 +89,7 @@ local function fn()
     inst.components.locomotor.pathcaps = { ignorecreep = true, allowocean = false }
     inst:AddComponent("ac_worker")
     inst:AddComponent("ac_upgradable")
+    inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
     inst:SetStateGraph("SGac_collector")
     inst:SetBrain(brain)
     inst.OnPreLoad = function(inst, data)
@@ -93,7 +97,10 @@ local function fn()
     end
     inst:ListenForEvent("onremove", OnRemove)
     inst:ListenForEvent("teleported", function() inst.components.ac_worker:OnDropped() end)
-    inst.OnEntitySleep = function() inst.components.ac_worker:Cancel() end
+    inst.OnEntitySleep = function()
+        Sounds.StopWalk(inst)
+        inst.components.ac_worker:Cancel()
+    end
     inst:DoTaskInTime(0, function()
         if inst.components.ac_worker.home == nil and not inst.components.inventoryitem:IsHeld() then
             inst.components.ac_worker:SetHome()

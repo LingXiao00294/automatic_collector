@@ -4,7 +4,7 @@ local UpgradeItem = require("components/ac_upgradeitem")
 local Upgradable = require("components/ac_upgradable")
 local API = require("ac_api")
 TheWorld = { ismastersim = true }
-STRINGS = { NAMES = { AUTOMATIC_COLLECTOR_MK2 = "铥矿采集车" } }
+STRINGS = { NAMES = { AUTOMATIC_COLLECTOR_MK2 = "采集车" } }
 Upgrades.Register()
 
 local function visuals(inst)
@@ -18,6 +18,7 @@ local function visuals(inst)
     }
     inst.MiniMapEntity = { SetIcon = function(_, v) inst.mapicon = v end }
     inst.SoundEmitter = { PlaySound = function() inst.sounds = (inst.sounds or 0) + 1 end }
+    inst.SoundEmitter.KillSound = function() end
 end
 
 local function prepare(count, worker)
@@ -45,7 +46,7 @@ function scenarios.upgrade_single_and_stack()
         assert(w.inst.bank == "automatic_collector_mk2" and w.inst.build == w.inst.bank)
         assert(w.inst.mapicon == "automatic_collector_mk2.tex")
         assert(w.inst.components.inventoryitem.imagename == "automatic_collector_mk2")
-        assert(Upgrades.DisplayName(w.inst) == "铥矿采集车")
+        assert(Upgrades.DisplayName(w.inst) == "采集车")
         if count == 1 then assert(not kit:IsValid()) else
             assert(kit:IsValid() and kit.components.stackable:StackSize() == count - 1)
             assert(kit.components.inventoryitem.owner == player and kit.skinname == "test_skin")
@@ -100,6 +101,7 @@ end
 
 function scenarios.upgrade_apply_rollback()
     local w, player, kit, installer = prepare(3)
+    w.radius = 9 H.range_nets(w)
     w:SetMoveSpeed(1.5) w:SetActionSpeed(1.25)
     local original = API.upgrades[Upgrades.CHASSIS].apply
     API.upgrades[Upgrades.CHASSIS].apply = function(inst, level)
@@ -111,9 +113,70 @@ function scenarios.upgrade_apply_rollback()
     assert(not Upgrades.IsAdvanced(w.inst) and w.inst.bank == "automatic_collector")
     assert(w.inst.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 0)
     assert(w.inst.components.locomotor.walkspeed == 4.5 and w.action_speed == 1.25)
+    assert(w.radius == 9 and w.inst._ac_radius:value() == 9)
     assert(kit.components.stackable:StackSize() == 3)
     assert(not installer.installing and not w.inst._ac_installing)
     assert(installer:Install(player, w.inst))
+end
+
+function scenarios.upgrade_radius_targets_and_delivery()
+    local Targets = require("ac_targets")
+    local w, player, _, installer = prepare(1, H.worker())
+    H.range_nets(w)
+    local inside, outside = H.chest(20), H.chest(20.1)
+    assert(#Targets.GetContainers(w) == 0)
+    local crop = H.farm_crop(20)
+    assert(Targets.Kind(w, crop) == nil)
+    assert(installer:Install(player, w.inst))
+    assert(w.radius == 20 and w.inst._ac_radius:value() == 20)
+    local containers = Targets.GetContainers(w)
+    assert(#containers == 1 and containers[1] == inside, "Upgrade must invalidate same-tick container cache")
+    assert(Targets.Kind(w, crop) == "pick")
+    assert(Targets.Kind(w, H.farm_crop(20.1)) == nil)
+    assert(Targets.Kind(w, H.item("twigs", 22)) == "pickup")
+    assert(Targets.Kind(w, H.item("twigs", 22.1)) == nil)
+    local giant_inside, giant_outside = H.giant(), H.giant()
+    giant_inside.x, giant_outside.x = 22, 22.1
+    assert(Targets.Kind(w, giant_inside) == "hammer")
+    assert(Targets.Kind(w, giant_outside) == nil)
+    local action = w:GetNextAction()
+    assert(action ~= nil and w:ValidateAction(action), "Expanded boundary must work for planning and contact")
+    w:Cancel(true)
+    local cargo = H.item("twigs", 0)
+    w.inst.components.inventory:GiveItem(cargo)
+    assert(Targets.FindContainer(w, cargo) == inside)
+    inside.valid = false
+    assert(Targets.FindContainer(w, cargo) == nil and outside:IsValid())
+end
+
+function scenarios.upgrade_radius_config_save_and_display()
+    local Insight = require("ac_insight")
+    H.range_runtime()
+    for _, radius in ipairs({ 8, 12, 16 }) do
+        TUNING.AUTOMATIC_COLLECTOR.radius = radius
+        local w, player, _, installer = prepare()
+        H.range_nets(w) H.range_events(w.inst)
+        assert(w.radius == radius)
+        Insight.Select(w.inst)
+        assert(w.inst._ac_range_indicator.radius == radius / 4)
+        assert(installer:Install(player, w.inst))
+        Insight.UpdateRange(w.inst)
+        assert(w.inst._ac_range_indicator.radius == 5 and w.inst._ac_range_anchor.x == 0)
+        Insight.Unselect(w.inst)
+        local data, levels = w:OnSave(), w.inst.components.ac_upgradable:OnSave()
+        for _, worker_first in ipairs({ false, true }) do
+            local restored = prepare()
+            H.range_nets(restored)
+            if worker_first then restored:OnLoad(data) end
+            restored.inst.components.ac_upgradable:OnLoad(levels)
+            if not worker_first then restored:OnLoad(data) end
+            assert(restored.radius == 20 and restored.inst._ac_radius:value() == 20)
+            restored:OnPickup(nil) restored.inst.x = 3 restored:OnDropped()
+            assert(restored.radius == 20 and restored.inst._ac_radius:value() == 20 and restored:GetHome().x == 3)
+            assert(restored.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
+            assert(restored.radius == radius and restored.inst._ac_radius:value() == radius)
+        end
+    end
 end
 
 function scenarios.upgrade_consumption_rollback()
@@ -288,7 +351,7 @@ function scenarios.upgrade_prefab_client_and_host()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
     client._ac_mk2:set(true)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
-    assert(client:displaynamefn() == "铥矿采集车")
+    assert(client:displaynamefn() == "采集车")
     seed = true
     local late = prefab.fn()
     assert(late.bank == "automatic_collector_mk2" and late.components.ac_upgradable == nil)
@@ -296,8 +359,26 @@ function scenarios.upgrade_prefab_client_and_host()
     local host = prefab.fn()
     host.components.ac_upgradable:OnLoad({ levels = { [Upgrades.CHASSIS] = 1 } })
     assert(host.bank == "automatic_collector_mk2" and host.components.locomotor.walkspeed == 6)
+    assert(host.components.ac_worker.radius == 20 and host._ac_radius:value() == 20)
     assert(host.components.inventoryitem.atlasname == "images/inventoryimages/automatic_collector_mk2.xml")
     assert(host.components.inventoryitem.imagename == "automatic_collector_mk2")
+    local Sounds = require("ac_sounds")
+    local loop, kills = false, 0
+    host.SoundEmitter = {
+        PlaySound = function(_, _, channel) if channel == "ac_walk" then loop = true end end,
+        KillSound = function(_, channel)
+            assert(channel == "ac_walk") loop = false kills = kills + 1
+        end,
+    }
+    Sounds.StartWalk(host)
+    host.components.inventoryitem.onpickupfn(host, nil)
+    assert(not loop and not host._ac_walk_sound and kills == 1)
+    Sounds.StartWalk(host)
+    host.OnEntitySleep(host)
+    assert(not loop and not host._ac_walk_sound and kills == 2)
+    Sounds.StartWalk(host)
+    host:PushEvent("onremove")
+    assert(not loop and not host._ac_walk_sound and kills == 3)
     package.loaded["prefabs/ac_upgrade_kit"] = nil
     local kit_prefab = require("prefabs/ac_upgrade_kit")
     local kit = kit_prefab.fn()

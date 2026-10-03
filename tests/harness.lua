@@ -625,7 +625,7 @@ local function enter(w, action, name)
     for _, s in ipairs(states) do if s.name == (name or "pickup") then state = s end end
     w.inst.buffered = action
     w.inst.AnimState = {SetDeltaTimeMultiplier=function() end, PlayAnimation=function(_, animation) w.inst.animation = animation end}
-    w.inst.SoundEmitter = {PlaySound=function() end}
+    w.inst.SoundEmitter = {PlaySound=function() end, KillSound=function() end}
     w.inst.sg = {statemem={}, timeinstate=0, currentstate=state,
         SetTimeout=function(self,t) self.timeout=t end,
         GoToState=function(self,name)
@@ -2048,4 +2048,5 @@ end
 
 upgrade_contract = { entity = entity, worker = worker, item = item, inventory = inventory,
     setup = setup, chest = chest, plant = plant, enter = enter, walk_to = walk_to,
-    execute = execute, states = states, giant = giant, farm_crop = farm_crop }
+    execute = execute, states = states, giant = giant, farm_crop = farm_crop,
+    range_nets = range_nets, range_runtime = range_runtime, range_events = range_events }

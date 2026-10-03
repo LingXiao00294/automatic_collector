@@ -1,7 +1,7 @@
 name = "拾荒机 · Automatic Collector"
-description = "version: 0.6.0\n拾荒机：拾取、采摘和收获，帮你收纳物品。\n右键暂停/启动。\n兼容 Insight、棱镜和能力勋章。"
+description = "version: 0.6.1\n拾荒机：拾取、采摘和收获，帮你收纳物品。\n右键暂停/启动。\n兼容 Insight、棱镜和能力勋章。"
 author = "Lingxiao00294"
-version = "0.6.0"
+version = "0.6.1"
 api_version = 10
 dst_compatible = true
 dont_starve_compatible = false

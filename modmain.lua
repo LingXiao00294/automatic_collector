@@ -12,6 +12,8 @@ G.TUNING.AUTOMATIC_COLLECTOR = {
 }
 
 Assets = {
+    Asset("SOUND", "sound/ac_collector.fsb"),
+    Asset("SOUNDPACKAGE", "sound/ac_collector.fev"),
     Asset("ATLAS", "images/inventoryimages/automatic_collector.xml"),
     Asset("IMAGE", "images/inventoryimages/automatic_collector.tex"),
     Asset("ATLAS", "images/map_icons/automatic_collector.xml"),
@@ -30,7 +32,7 @@ RegisterInventoryItemAtlas("images/inventoryimages/automatic_collector_mk2.xml",
 
 local strings = G.STRINGS
 strings.NAMES.AUTOMATIC_COLLECTOR = "拾荒机"
-strings.NAMES.AUTOMATIC_COLLECTOR_MK2 = "铥矿采集车"
+strings.NAMES.AUTOMATIC_COLLECTOR_MK2 = "采集车"
 strings.NAMES.AC_UPGRADE_KIT = "拾荒机升级套件"
 strings.RECIPE_DESC.AC_UPGRADE_KIT = "铥矿加固，步履更快。"
 strings.CHARACTERS.GENERIC.DESCRIBE.AC_UPGRADE_KIT = "给拾荒机装上这块机芯。"
