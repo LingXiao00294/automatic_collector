@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?>
+<spriter_data scml_version="1.0" generator="Automatic Collector rig">
+  <folder id="0" name="parts">
+    <file id="0" name="parts/kit_world.png" width="76" height="56" pivot_x="0.5" pivot_y="0.0" />
+  </folder>
+  <entity id="0" name="ac_upgrade_kit">
+    <animation id="0" name="idle_all" length="33" interval="33" looping="true">
+      <mainline>
+        <key id="0" time="0">
+          <object_ref id="0" timeline="0" key="0" z_index="0" />
+        </key>
+      </mainline>
+      <timeline id="0" name="body" object_type="sprite">
+        <key id="0" time="0" spin="0">
+          <object folder="0" file="0" x="0" y="0" angle="0" scale_x="1" scale_y="1" />
+        </key>
+      </timeline>
+    </animation>
+  </entity>
+</spriter_data>

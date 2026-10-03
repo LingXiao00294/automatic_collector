@@ -1,0 +1,10 @@
+{
+  "name": "ac_upgrade_kit",
+  "bank": "ac_upgrade_kit",
+  "opaque_min": 250,
+  "parts": {
+    "kit_world": {"source": "kit_world.png", "height": 56, "pivot": [0.5, 1.0], "trim": true, "trim_alpha_threshold": 4}
+  },
+  "fps": 30,
+  "animations": {"idle": {"frames": 1, "impact_frame": null}}
+}

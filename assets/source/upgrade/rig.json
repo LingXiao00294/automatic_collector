@@ -1,0 +1,21 @@
+{
+  "name": "automatic_collector_mk2",
+  "bank": "automatic_collector_mk2",
+  "parts": {
+    "body_front": {"source": "body_front.png", "height": 140, "width": 220, "pivot": [0.5, 1.0], "trim": true, "trim_alpha_threshold": 4},
+    "body_side": {"source": "body_side.png", "height": 140, "pivot": [0.5, 1.0], "trim": true, "trim_alpha_threshold": 4},
+    "body_back": {"source": "body_back.png", "height": 140, "width": 220, "pivot": [0.5, 1.0], "trim": true, "trim_alpha_threshold": 4}
+  },
+  "fps": 30,
+  "preview_move_speed": 2,
+  "preview_action_speed": 1,
+  "animations": {
+    "idle": {"frames": 60, "impact_frame": null},
+    "walk_pre": {"frames": 6, "impact_frame": null},
+    "walk_loop": {"frames": 24, "impact_frame": null},
+    "walk_pst": {"frames": 6, "impact_frame": null},
+    "pickup": {"frames": 30, "impact_frame": 15},
+    "hammer": {"frames": 39, "impact_frame": 21},
+    "store": {"frames": 30, "impact_frame": 6}
+  }
+}

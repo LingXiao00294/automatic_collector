@@ -7,6 +7,7 @@
 - [技术报告](TECHNICAL_REPORT.md)：架构、采集与运输策略、动作时序和兼容边界。
 - [扩展接口](API.md)：升级、容量、资源适配器、标签和事件。
 - [美术与动画](ART.md)：源图、绑定、编译格式和动画制作。
+- [升级套件方案](UPGRADE_PLAN.md)：升级车与套件的设计、已制作美术和待实现玩法。
 - [验证记录](TESTING.md)：各版本检查结果、历史服务器验证和实机验收项目。
 
 开发文档只保留在源码仓库的 `docs/`；发行 README 只提供玩家说明，不链接未发行的文档。
@@ -49,6 +50,14 @@ uv run tools/build_assets.py --mod-tools "D:/Programs/Steam/steamapps/common/Don
 ```
 
 构建依赖官方 Mod Tools 的 `TextureConverter.exe`；路径不同可替换参数。源图在 `assets/source/`，运动曲线与导出逻辑在 `tools/build_assets.py`。构建会覆盖生成资源，不反读手工编辑的 SCML。完成后检查四方向及动作预览，并运行资源测试；详见 [美术说明](ART.md)。
+
+升级车与套件独立构建，不覆盖原车：
+
+```powershell
+uv run --locked -m tools.build_upgrade_assets --mod-tools "D:/Programs/Steam/steamapps/common/Don't Starve Mod Tools/mod_tools"
+```
+
+源图与绑定位于 `assets/source/upgrade/`；预览输出到 `assets/generated/upgrade/collector/` 和 `kit/`，编译输出到 `anim/` 与 `images/`。升级玩法尚未实现，完成美术构建不能视为升级功能已发布。
 
 ## 发行
 

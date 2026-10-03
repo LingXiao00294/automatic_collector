@@ -7,7 +7,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageSequence
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,28 +38,45 @@ class Reader:
         return names
 
 
-def test_animation_runtime_contract():
-    with ZipFile(ROOT / "anim/automatic_collector.zip") as archive:
+@pytest.mark.parametrize("bank_name", ["automatic_collector", "automatic_collector_mk2"])
+def test_animation_runtime_contract(bank_name):
+    with ZipFile(ROOT / f"anim/{bank_name}.zip") as archive:
         assert set(archive.namelist()) == {"anim.bin", "build.bin", "atlas-0.tex"}
+        build = Reader(archive.read("build.bin"))
+        _, _, symbol_count, _ = build.values("4sIII")
+        build.string()
+        for _ in range(build.values("I")[0]):
+            build.string()
+        rectangles = {}
+        for _ in range(symbol_count):
+            symbol, _, _, _, cx, cy, width, height, _, _ = build.values("IIIIffffII")
+            rectangles[symbol] = (cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2)
         reader = Reader(archive.read("anim.bin"))
         magic, version, total_elements, total_frames, events, count = reader.values("4sIIIII")
         assert (magic, version, events, count) == (b"ANIM", 4, 0, 21)
         actual_frames, actual_elements = 0, 0
         facings = {}
         symbols = set()
+        banks = set()
         for _ in range(count):
             name = reader.string()
-            facing, _, fps, frames = reader.values("BIfI")
+            facing, bank, fps, frames = reader.values("BIfI")
+            banks.add(bank)
             facings.setdefault(name, set()).add(facing)
             assert fps == 30
             for frame_index in range(frames):
-                _, _, w, h, event_count, elements = reader.values("ffffII")
+                frame_cx, frame_cy, w, h, event_count, elements = reader.values("ffffII")
                 assert w > 0 and h > 0 and event_count == 0
                 assert elements == 1, "Only the chassis belongs in the simplified model"
                 for _ in range(elements):
                     symbol, _, _, a, b, c, d, x, y, _ = reader.values("IIIfffffff")
                     assert abs(a * d - b * c) > 0.1, "Degenerate sprite matrix"
                     symbols.add(symbol)
+                    left, top, right, bottom = rectangles[symbol]
+                    for px, py in ((left, top), (right, top), (left, bottom), (right, bottom)):
+                        tx, ty = a * px + c * py + x, b * px + d * py + y
+                        assert frame_cx - w / 2 - 0.001 <= tx <= frame_cx + w / 2 + 0.001
+                        assert frame_cy - h / 2 - 0.001 <= ty <= frame_cy + h / 2 + 0.001
                     if name == "pickup" and frame_index == 15:
                         assert y == pytest.approx(18) and abs(d) == pytest.approx(0.88)
                         assert x == pytest.approx(0), "Pickup sinks over the reached target"
@@ -84,27 +101,37 @@ def test_animation_runtime_contract():
         }
         assert all(facing == {2, 5, 8} for facing in facings.values())
         names = reader.hashes()
+        assert {names[bank] for bank in banks} == {bank_name}
         assert {names[symbol] for symbol in symbols} == {"body_front", "body_side", "body_back"}
 
 
-def test_build_atlas_vertices():
-    with ZipFile(ROOT / "anim/automatic_collector.zip") as archive:
+@pytest.mark.parametrize(
+    ("build_name", "symbols"),
+    [
+        ("automatic_collector", {"body_front", "body_side", "body_back"}),
+        ("automatic_collector_mk2", {"body_front", "body_side", "body_back"}),
+        ("ac_upgrade_kit", {"kit_world"}),
+    ],
+)
+def test_build_atlas_vertices(build_name, symbols):
+    symbol_count = len(symbols)
+    with ZipFile(ROOT / f"anim/{build_name}.zip") as archive:
         reader = Reader(archive.read("build.bin"))
-        assert reader.values("4sIII") == (b"BILD", 6, 3, 3)
-        assert reader.string() == "automatic_collector"
+        assert reader.values("4sIII") == (b"BILD", 6, symbol_count, symbol_count)
+        assert reader.string() == build_name
         assert reader.values("I") == (1,)
         assert reader.string() == "atlas-0.tex"
         ranges = []
-        for _ in range(3):
+        for _ in range(symbol_count):
             _, count, frame, duration, _, _, w, h, first, vertices = reader.values("IIIIffffII")
             assert count == 1 and frame == 0 and duration == 1 and w > 0 and h > 0
             ranges.append((first, vertices))
-        assert reader.values("I") == (18,)
-        for _ in range(18):
+        assert reader.values("I") == (symbol_count * 6,)
+        for _ in range(symbol_count * 6):
             _, _, _, u, v, sampler = reader.values("ffffff")
             assert 0 <= u <= 1 and 0 <= v <= 1 and sampler == 0
-        assert sorted(ranges) == [(i * 6, 6) for i in range(3)]
-        assert set(reader.hashes().values()) == {"body_front", "body_side", "body_back"}
+        assert sorted(ranges) == [(i * 6, 6) for i in range(symbol_count)]
+        assert set(reader.hashes().values()) == symbols
         assert archive.read("atlas-0.tex")[:4] == b"KTEX"
 
 
@@ -114,6 +141,9 @@ def test_build_atlas_vertices():
         "modicon",
         "images/inventoryimages/automatic_collector",
         "images/map_icons/automatic_collector",
+        "images/inventoryimages/automatic_collector_mk2",
+        "images/map_icons/automatic_collector_mk2",
+        "images/inventoryimages/ac_upgrade_kit",
     ],
 )
 def test_icons(path):
@@ -123,10 +153,15 @@ def test_icons(path):
     assert (ROOT / path).with_name(texture.attrib["filename"]).read_bytes()[:4] == b"KTEX"
     elements = atlas.findall("Elements/Element")
     assert len(elements) == 1 and elements[0].attrib["name"].endswith(".tex")
-    if path == "images/inventoryimages/automatic_collector":
+    if path.startswith("images/inventoryimages/"):
         data = (ROOT / f"{path}.tex").read_bytes()
         assert struct.unpack_from("<HH", data, 8) == (64, 64)
-        preview = Image.open(ROOT / "assets/generated/inventory_automatic_collector.png")
+        preview_directory = {
+            "automatic_collector": "assets/generated",
+            "automatic_collector_mk2": "assets/generated/upgrade/collector",
+            "ac_upgrade_kit": "assets/generated/upgrade/kit",
+        }[Path(path).name]
+        preview = Image.open(ROOT / preview_directory / f"inventory_{Path(path).name}.png")
         assert preview.size == (64, 64)
         bbox = preview.getchannel("A").getbbox()
         assert bbox is not None
@@ -150,3 +185,63 @@ def test_editable_source():
         for name in expected_files:
             sprite = Image.open(directory / name)
             assert sprite.height == 140 and sprite.getchannel("A").getextrema() == (0, 255)
+
+
+def test_upgrade_has_its_own_bank_with_unchanged_action_frames():
+    spec = json.loads((ROOT / "assets/source/upgrade/rig.json").read_text())
+    base = json.loads((ROOT / "assets/source/rig.json").read_text())
+    assert spec["bank"] == spec["name"] == "automatic_collector_mk2"
+    assert spec["animations"] == base["animations"] and spec["fps"] == base["fps"]
+    assert (spec["preview_move_speed"], spec["preview_action_speed"]) == (2, 1)
+    with ZipFile(ROOT / "anim/automatic_collector_mk2.zip") as archive:
+        assert set(archive.namelist()) == {"build.bin", "anim.bin", "atlas-0.tex"}
+    source = ET.parse(ROOT / "assets/generated/upgrade/collector/automatic_collector_mk2.scml")
+    assert len(source.findall("folder/file")) == 3
+    animations = source.findall("entity/animation")
+    assert len(animations) == 21
+    assert {anim.attrib["name"].rsplit("_", 1)[1] for anim in animations} == {"up", "down", "right"}
+    for anim in animations:
+        name = anim.attrib["name"].rsplit("_", 1)[0]
+        assert len(anim.findall("mainline/key")) == base["animations"][name]["frames"]
+
+
+def test_kit_idle_uses_its_own_all_facing_bank():
+    with ZipFile(ROOT / "anim/ac_upgrade_kit.zip") as archive:
+        assert set(archive.namelist()) == {"build.bin", "anim.bin", "atlas-0.tex"}
+        reader = Reader(archive.read("anim.bin"))
+        assert reader.values("4sIIIII") == (b"ANIM", 4, 1, 1, 0, 1)
+        assert reader.string() == "idle"
+        facing, bank, fps, frames = reader.values("BIfI")
+        assert (facing, fps, frames) == (255, 30, 1)
+        _, _, width, height, events, elements = reader.values("ffffII")
+        assert width > 0 and height == 56 and events == 0 and elements == 1
+        symbol, _, _, a, b, c, d, x, y, _ = reader.values("IIIfffffff")
+        assert (a, b, c, d, x, y) == (1, 0, 0, 1, 0, 0)
+        names = reader.hashes()
+        assert names[bank] == "ac_upgrade_kit" and names[symbol] == "kit_world"
+
+
+@pytest.mark.parametrize(
+    ("animation", "duration"),
+    [("idle", 2000), ("walk_loop", 400), ("pickup", 1000), ("hammer", 1300), ("store", 1000)],
+)
+def test_upgrade_gif_timing_matches_latest_plan(animation, duration):
+    with Image.open(ROOT / f"assets/generated/upgrade/collector/{animation}.gif") as preview:
+        elapsed = 0
+        for frame in ImageSequence.Iterator(preview):
+            elapsed += frame.info["duration"]
+        assert elapsed == duration
+
+
+@pytest.mark.parametrize("name", ["body_front", "body_side", "body_back", "kit_world"])
+def test_upgrade_sources_have_true_transparency_and_scaled_parts(name):
+    with Image.open(ROOT / f"assets/source/upgrade/{name}.png") as source:
+        assert source.mode == "RGBA"
+        minimum, maximum = source.getchannel("A").getextrema()
+        assert minimum == 0 and isinstance(maximum, (int, float)) and maximum >= 250
+    kind = "kit" if name == "kit_world" else "collector"
+    with Image.open(ROOT / f"assets/generated/upgrade/{kind}/parts/{name}.png") as scaled:
+        assert scaled.height == (56 if kind == "kit" else 140)
+        if name in {"body_front", "body_back"}:
+            assert scaled.width == 220, "Front and rear must keep the same chassis width"
+        assert scaled.getchannel("A").getextrema()[0] == 0
