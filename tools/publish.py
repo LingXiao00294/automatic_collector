@@ -4,7 +4,15 @@ from pathlib import Path
 from shutil import copy2, rmtree
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ("modinfo.lua", "modmain.lua", "modicon.xml", "modicon.tex", "README.md", "LICENSE")
+FILES = (
+    "modinfo.lua",
+    "modmain.lua",
+    "modicon.xml",
+    "modicon.tex",
+    "preview.jpg",
+    "README.md",
+    "LICENSE",
+)
 TREES = ("scripts", "anim", "images", "sound")
 
 
