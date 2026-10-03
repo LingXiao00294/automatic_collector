@@ -97,19 +97,28 @@ class Animation:
     frames: list[list[Element]]
 
 
-def extract_parts(spec: dict) -> dict[str, Sprite]:
+def extract_parts(
+    spec: dict, source: Path = SOURCE, generated: Path = GENERATED
+) -> dict[str, Sprite]:
     """Load the three authored chassis sprites; discard stale generated parts."""
     parts = {}
-    out = GENERATED / "parts"
+    out = generated / "parts"
     out.mkdir(parents=True, exist_ok=True)
     for name, definition in spec["parts"].items():
-        image = Image.open(SOURCE / definition["source"]).convert("RGBA")
-        if image.getchannel("A").getextrema() != (0, 255):
+        image = Image.open(source / definition["source"]).convert("RGBA")
+        alpha = image.getchannel("A")
+        minimum, maximum = alpha.getextrema()
+        if minimum != 0 or maximum < spec.get("opaque_min", 255):
             raise ValueError(f"Sprite must have transparent and opaque pixels: {name}")
+        if definition.get("trim", False):
+            cutoff = definition.get("trim_alpha_threshold", 1)
+            bbox = alpha.point(lambda value, cutoff=cutoff: 255 if value >= cutoff else 0).getbbox()
+            if bbox is None:
+                raise ValueError(f"Empty sprite: {name}")
+            image = image.crop(bbox)
         height = definition["height"]
-        image = image.resize(
-            (round(image.width * height / image.height), height), Image.Resampling.LANCZOS
-        )
+        width = definition.get("width", round(image.width * height / image.height))
+        image = image.resize((width, height), Image.Resampling.LANCZOS)
         image.save(out / f"{name}.png")
         px, py = definition["pivot"]
         parts[name] = Sprite(name, image, px * image.width, py * image.height)
@@ -252,13 +261,12 @@ def encode_animation(anims: list[Animation], parts: dict[str, Sprite], spec: dic
     total_frames = sum(len(a.frames) for a in anims)
     total_elements = sum(len(f) for a in anims for f in a.frames)
     stream.write(struct.pack("<4sIIIII", b"ANIM", 4, total_elements, total_frames, 0, len(anims)))
-    names = {spec["name"]}
+    bank = spec.get("bank", spec["name"])
+    names = {bank}
     for anim in anims:
         write_string(stream, anim.name)
         stream.write(
-            struct.pack(
-                "<BIfI", anim.facing, name_hash(spec["name"]), spec["fps"], len(anim.frames)
-            )
+            struct.pack("<BIfI", anim.facing, name_hash(bank), spec["fps"], len(anim.frames))
         )
         for frame in anim.frames:
             stream.write(struct.pack("<ffffII", *bounds(frame, parts), 0, len(frame)))
@@ -278,7 +286,9 @@ def encode_animation(anims: list[Animation], parts: dict[str, Sprite], spec: dic
     return stream.getvalue()
 
 
-def export_scml(anims: list[Animation], parts: dict[str, Sprite], spec: dict) -> None:
+def export_scml(
+    anims: list[Animation], parts: dict[str, Sprite], spec: dict, generated: Path = GENERATED
+) -> None:
     """Editable Spriter source; the shared side is mirrored by DST at runtime."""
     root = ET.Element("spriter_data", scml_version="1.0", generator="Automatic Collector rig")
     folder = ET.SubElement(root, "folder", id="0", name="parts")
@@ -350,18 +360,20 @@ def export_scml(anims: list[Animation], parts: dict[str, Sprite], spec: dict) ->
                 )
     ET.indent(root)
     ET.ElementTree(root).write(
-        GENERATED / "automatic_collector.scml", encoding="utf-8", xml_declaration=True
+        generated / f"{spec['name']}.scml", encoding="utf-8", xml_declaration=True
     )
 
 
-def render(elements: list[Element], parts: dict[str, Sprite]) -> Image.Image:
+def render(
+    elements: list[Element], parts: dict[str, Sprite], size: tuple[int, int] = (400, 320)
+) -> Image.Image:
     """Render the same sprite matrices as the game for QA and icons."""
-    canvas = Image.new("RGBA", (400, 320))
+    canvas = Image.new("RGBA", size)
     for element in elements:
         sprite = parts[element.sprite]
         a, b, c, d, tx, ty = element.matrix
-        tx += 200 - a * sprite.pivot_x - c * sprite.pivot_y
-        ty += 280 - b * sprite.pivot_x - d * sprite.pivot_y
+        tx += size[0] / 2 - a * sprite.pivot_x - c * sprite.pivot_y
+        ty += size[1] - 40 - b * sprite.pivot_x - d * sprite.pivot_y
         det = a * d - b * c
         coeffs = (
             d / det,
@@ -411,6 +423,7 @@ def icon(
     tool_dir: Path,
     element_name: str,
     padding: int = 4,
+    generated: Path = GENERATED,
 ) -> None:
     bbox = image.getchannel("A").getbbox()
     if bbox is None:
@@ -420,7 +433,7 @@ def icon(
     output = Image.new("RGBA", (size, size))
     output.alpha_composite(thumb, ((size - thumb.width) // 2, (size - thumb.height) // 2))
     prefix = "inventory_" if path.parent.name == "inventoryimages" else ""
-    png = GENERATED / f"{prefix}{path.name}.png"
+    png = generated / f"{prefix}{path.name}.png"
     output.save(png)
     converter(tool_dir, png, path.with_suffix(".tex"))
     root = ET.Element("Atlas")

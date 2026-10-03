@@ -1,11 +1,17 @@
 local brain = require("brains/ac_collectorbrain")
+local Upgrades = require("ac_upgrades")
+local Sounds = require("ac_sounds")
 local assets = {
     Asset("ANIM", "anim/automatic_collector.zip"),
+    Asset("ANIM", "anim/automatic_collector_mk2.zip"),
     Asset("ATLAS", "images/inventoryimages/automatic_collector.xml"),
     Asset("IMAGE", "images/inventoryimages/automatic_collector.tex"),
+    Asset("ATLAS", "images/inventoryimages/automatic_collector_mk2.xml"),
+    Asset("IMAGE", "images/inventoryimages/automatic_collector_mk2.tex"),
 }
 
 local function OnPickup(inst, owner)
+    Sounds.StopWalk(inst)
     inst.components.ac_worker:OnPickup(owner)
 end
 
@@ -20,6 +26,7 @@ local function GetStatus(inst)
 end
 
 local function OnRemove(inst)
+    Sounds.StopWalk(inst)
     inst.components.inventory:DropEverything()
 end
 
@@ -49,6 +56,9 @@ local function fn()
     inst:AddTag("mech")
     inst:AddTag("NOBLOCK")
     inst._ac_enabled = net_bool(inst.GUID, "ac.enabled")
+    inst._ac_mk2 = net_bool(inst.GUID, "ac.mk2", "ac_mk2dirty")
+    inst.displaynamefn = Upgrades.DisplayName
+    inst:ListenForEvent("ac_mk2dirty", Upgrades.RefreshVisual)
     inst._ac_blocked = net_bool(inst.GUID, "ac.blocked")
     inst._ac_home_valid = net_bool(inst.GUID, "ac.home_valid")
     inst._ac_home_x = net_float(inst.GUID, "ac.home_x")
@@ -58,6 +68,7 @@ local function fn()
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
     inst.entity:SetPristine()
+    Upgrades.RefreshVisual(inst)
     if not TheWorld.ismastersim then return inst end
 
     inst:AddComponent("inspectable")
@@ -78,6 +89,7 @@ local function fn()
     inst.components.locomotor.pathcaps = { ignorecreep = true, allowocean = false }
     inst:AddComponent("ac_worker")
     inst:AddComponent("ac_upgradable")
+    inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
     inst:SetStateGraph("SGac_collector")
     inst:SetBrain(brain)
     inst.OnPreLoad = function(inst, data)
@@ -85,7 +97,10 @@ local function fn()
     end
     inst:ListenForEvent("onremove", OnRemove)
     inst:ListenForEvent("teleported", function() inst.components.ac_worker:OnDropped() end)
-    inst.OnEntitySleep = function() inst.components.ac_worker:Cancel() end
+    inst.OnEntitySleep = function()
+        Sounds.StopWalk(inst)
+        inst.components.ac_worker:Cancel()
+    end
     inst:DoTaskInTime(0, function()
         if inst.components.ac_worker.home == nil and not inst.components.inventoryitem:IsHeld() then
             inst.components.ac_worker:SetHome()

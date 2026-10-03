@@ -15,6 +15,9 @@ def lua():
     runtime = LuaRuntime(unpack_returned_tuples=True)
     runtime.execute(f'package.path = "{ROOT.as_posix()}/scripts/?.lua;" .. package.path')
     runtime.execute((ROOT / "tests/harness.lua").read_text(encoding="utf-8"))
+    runtime.globals().TEST_ROOT = ROOT.as_posix()
+    runtime.execute((ROOT / "tests/harness_upgrade.lua").read_text(encoding="utf-8"))
+    runtime.execute((ROOT / "tests/harness_sounds.lua").read_text(encoding="utf-8"))
     return runtime
 
 
@@ -40,6 +43,19 @@ def test_lua_51_syntax():
         "pause",
         "target_removed",
         "target_held",
+        "native_failure_before_watchdog",
+        "native_failure_preserves_cargo",
+        "native_failure_world_conditions",
+        "native_failure_timeout_and_pause",
+        "giant_displaced_drop_before_next_plant",
+        "pickup_stolen_en_route",
+        "pickup_removed_en_route",
+        "pickup_stolen_preserves_carried_stack",
+        "work_targets_change_en_route",
+        "active_watchdog_fast_recovery",
+        "watchdog_idle_and_lifecycle",
+        "active_watchdog_keeps_valid_target",
+        "active_watchdog_rechecks_work_and_capacity",
         "immature",
         "giant_harvest",
         "giant_hammer",
@@ -53,6 +69,11 @@ def test_lua_51_syntax():
         "unknown_upgrade",
         "upgrades",
         "adapter",
+        "adapter_scans_do_not_sort_names",
+        "adapter_order_overwrite_and_late_registration",
+        "sound_walk_continuous_and_cancelled",
+        "sound_work_contact_and_profiles",
+        "sound_signals_skip_held_and_sleeping",
         "scan_cost",
         "impact_once",
         "impact_cancelled",
@@ -77,8 +98,11 @@ def test_lua_51_syntax():
         "unknown_harvest_delivers_first",
         "batch_adapter",
         "harvest_uses_ram_animation",
-        "pickup_arrives_over_item",
+        "pickup_uses_winona_arrival_distance",
+        "two_workers_pickup_overlapping_drops",
         "store_open_window",
+        "two_workers_store_in_open_chest",
+        "two_workers_store_rechecks_remaining_capacity",
         "store_open_speed",
         "store_open_interrupted",
         "store_open_cancelled_after_success",
@@ -126,6 +150,23 @@ def test_lua_51_syntax():
         "farm_success_count_and_contact_safety",
         "farm_partial_failure_preserves_products",
         "farm_pause_save_restore_and_relocate",
+        "upgrade_single_and_stack",
+        "upgrade_two_players_and_reentry",
+        "upgrade_invalid_or_interrupted",
+        "upgrade_apply_rollback",
+        "upgrade_radius_targets_and_delivery",
+        "upgrade_radius_config_save_and_display",
+        "upgrade_consumption_rollback",
+        "upgrade_detach_failure_and_cancel_recheck",
+        "upgrade_removed_during_apply_returns_kit",
+        "upgrade_actual_work_contacts_once",
+        "upgrade_walk_cargo_pause_boat",
+        "upgrade_contact_before_and_after",
+        "upgrade_store_closes_only_own_opener",
+        "upgrade_load_idempotent_and_relocate",
+        "upgrade_work_timing_and_walk_reset",
+        "upgrade_recipe_and_action_selection",
+        "upgrade_prefab_client_and_host",
     ],
 )
 def test_scenario(lua, scenario):

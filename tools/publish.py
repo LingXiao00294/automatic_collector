@@ -5,7 +5,7 @@ from shutil import copy2, rmtree
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = ("modinfo.lua", "modmain.lua", "modicon.xml", "modicon.tex", "README.md", "LICENSE")
-TREES = ("scripts", "anim", "images")
+TREES = ("scripts", "anim", "images", "sound")
 
 
 def release_files(root: Path) -> list[Path]:

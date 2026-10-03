@@ -70,13 +70,8 @@ function M.Kind(worker, target)
     if target.components.crop ~= nil and target.components.crop.matured then
         return "harvest", ACTIONS.HARVEST
     end
-    -- Stable adapter ordering makes behaviour independent of Lua hash iteration order.
-    local names = {}
-    for name in pairs(API.adapters) do
-        table.insert(names, name)
-    end
-    table.sort(names)
-    for _, name in ipairs(names) do
+    -- Registration maintains stable ordering; candidate scans reuse it without sorting.
+    for _, name in ipairs(API.GetAdapterNames()) do
         local adapter = API.adapters[name]
         if adapter.match(worker.inst, target) then
             return "adapter:" .. name, adapter.action(worker.inst, target)
@@ -99,8 +94,8 @@ function M.IsDeliveryContainer(worker, target)
 end
 
 function M.IsContainer(worker, target)
-    return M.IsDeliveryContainer(worker, target) and target.components.container:CanOpen()
-        and not target.components.container:IsOpenedByOthers(worker.inst)
+    -- Native storage robots choose receivers by item acceptance, not openers.
+    return M.IsDeliveryContainer(worker, target)
 end
 
 function M.IsFarmWork(target, kind)
@@ -272,8 +267,9 @@ function M.FindWork(worker, mode, entities)
                     local rank = priority[kind] or 3
                     -- Prepare every available giant before starting a cargo group.
                     -- Once carrying, fill/deliver that group before starting new work.
-                    if empty and (kind == "hammer" or (kind == "pick"
-                        and Compat.IsGiantPlant(target))) then
+                    if empty and kind == "hammer" then
+                        rank = -2
+                    elseif empty and kind == "pick" and Compat.IsGiantPlant(target) then
                         rank = -1
                     end
                     local score = rank * 100000 + worker.inst:GetDistanceSqToInst(target)

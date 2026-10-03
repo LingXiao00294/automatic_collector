@@ -7,6 +7,8 @@
 - [技术报告](TECHNICAL_REPORT.md)：架构、采集与运输策略、动作时序和兼容边界。
 - [扩展接口](API.md)：升级、容量、资源适配器、标签和事件。
 - [美术与动画](ART.md)：源图、绑定、编译格式和动画制作。
+- [音效](SOUNDS.md)：原创 WAV 合成、FMOD 编译、试听与声音生命周期。
+- [升级套件方案](UPGRADE_PLAN.md)：升级车与套件的设计、已制作美术、升级实现与实机验收。
 - [验证记录](TESTING.md)：各版本检查结果、历史服务器验证和实机验收项目。
 
 开发文档只保留在源码仓库的 `docs/`；发行 README 只提供玩家说明，不链接未发行的文档。
@@ -19,11 +21,11 @@
 | --- | --- |
 | `modinfo.lua`、`modmain.lua` | 模组元信息、配置、配方、动作与接口注册 |
 | `scripts/` | 实体、组件、Brain、StateGraph 与目标筛选 |
-| `assets/source/` | 原创车身贴图与 `rig.json` |
+| `assets/source/` | 原创车身贴图、`rig.json`、音源 WAV 与 FDP |
 | `assets/generated/` | 可编辑 SCML、图集、GIF 和预览，构建时覆盖 |
-| `anim/`、`images/`、`modicon.*` | 游戏直接加载的编译资源 |
+| `anim/`、`images/`、`sound/`、`modicon.*` | 游戏直接加载的编译资源 |
 | `tests/` | LuaJIT 行为场景、资源与发行检查 |
-| `tools/` | 美术构建、发行和隔离服务器验证工具 |
+| `tools/` | 美术与音效构建、发行和隔离服务器验证工具 |
 
 ## 安装工具与验证
 
@@ -50,6 +52,22 @@ uv run tools/build_assets.py --mod-tools "D:/Programs/Steam/steamapps/common/Don
 
 构建依赖官方 Mod Tools 的 `TextureConverter.exe`；路径不同可替换参数。源图在 `assets/source/`，运动曲线与导出逻辑在 `tools/build_assets.py`。构建会覆盖生成资源，不反读手工编辑的 SCML。完成后检查四方向及动作预览，并运行资源测试；详见 [美术说明](ART.md)。
 
+升级车与套件独立构建，不覆盖原车：
+
+```powershell
+uv run --locked -m tools.build_upgrade_assets --mod-tools "D:/Programs/Steam/steamapps/common/Don't Starve Mod Tools/mod_tools"
+```
+
+源图与绑定位于 `assets/source/upgrade/`；预览输出到 `assets/generated/upgrade/collector/` 和 `kit/`，编译输出到 `anim/` 与 `images/`。0.6.0 已接入升级玩法；美术构建与 LuaJIT 回归不能代替用户的客户端及联网验收。
+
+## 音效构建
+
+```powershell
+uv run --locked -m tools.build_sounds
+```
+
+使用官方 Mod Tools 的 `FMOD_Designer/fmod_designercl.exe`；安装目录不同可传 `--mod-tools`。合成源 WAV 与 FDP 位于 `assets/source/audio/`，试听位于 `assets/generated/audio/`，游戏使用 `sound/ac_collector.fev` 与 `.fsb`。编译日志与缓存只写入 `.cache/sound_build/`。修改音色应调整构建脚本并重建，不手改生成的 FDP；详见 [音效说明](SOUNDS.md)。
+
 ## 发行
 
 ```powershell
@@ -58,7 +76,7 @@ uv run tools/publish.py
 
 脚本先验证源文件，再清空固定的 `publish/` 并复制发行文件，保留目录结构，不生成发行压缩包或 `dist/`。不要在 `publish/` 保存手动修改。源文件缺失时保留上一份发行；输出目录为符号链接、Junction 或普通文件时拒绝覆盖。
 
-发行白名单为 `modinfo.lua`、`modmain.lua`、`modicon.xml`、`modicon.tex`、`README.md`、`LICENSE`，以及 `scripts/`、`anim/`、`images/`。动画 ZIP 是游戏必需的编译资源，会原样复制。`docs/`、美术源、测试、构建工具、参考脚本、存档及缓存均不发行。
+发行白名单为 `modinfo.lua`、`modmain.lua`、`modicon.xml`、`modicon.tex`、`README.md`、`LICENSE`，以及 `scripts/`、`anim/`、`images/`、`sound/`。动画 ZIP 是游戏必需的编译资源，会原样复制。`docs/`、美术源、测试、构建工具、参考脚本、存档及缓存均不发行。
 
 将 `publish/` 的内容复制到游戏的 `mods/automatic_collector/`。发布新模组版本时同步 `modinfo.lua`、`pyproject.toml`、锁文件中的项目版本及 README；文档整理不单独提升模组版本。
 
