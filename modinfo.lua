@@ -1,5 +1,5 @@
 name = "拾荒机 · Automatic Collector"
-description = "version: 0.6.2\n拾荒机：拾取、采摘和收获，帮你收纳物品。\n右键暂停/启动。\n兼容 Insight、棱镜和能力勋章。"
+description = "version: 0.6.2\n拾荒机：帮你收纳物品。\n采集车：还能帮你收获植物、农作物。\n右键开关采集功能。\n兼容 Insight、棱镜和能力勋章。\n\n本模组代码、美术资源和动画由 AI（Codex）生成。\n\nchangelog: \nv0.6.2\n- 删除了基础版小车的采集功能\n- 右键开关小车改成了开关采集功能\n- 现在小车不会被行动键（默认“空格”键）捡起了"
 author = "Lingxiao00294"
 version = "0.6.2"
 api_version = 10
