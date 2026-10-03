@@ -4,6 +4,10 @@
 
 ## 升级
 
+0.6.0 内置注册 `ac_chassis_mk2`，`maxlevel = 1`。套件通过服务端 `ac_upgradeitem:Install(doer, target)` 安装；不要仅以 `SetLevel` 的返回值判断首次成功，该接口接受重复同等级设置。内置等级 1 绝对设置移速倍率 2、作业倍率 1，等级 0 恢复倍率 1；加载与重复应用不累乘。其他速度扩展若覆盖同一接口，需要自行合并。
+
+`_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端仅据此刷新 bank、build、地图图标及显示名；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。仍使用 `automatic_collector` prefab，升级不会替换实体。
+
 ```lua
 local G = GLOBAL
 local api = G.AUTOMATIC_COLLECTOR_API
@@ -36,7 +40,7 @@ local changed = collector.components.ac_upgradable:SetLevel("my_mod_speed", 2)
 local level = collector.components.ac_upgradable:GetLevel("my_mod_speed")
 ```
 
-容量升级预留接口（默认 1 组，尚无实际升级物品）：
+容量升级预留接口（默认 1 组，内置套件不增加容量）：
 
 ```lua
 api.RegisterUpgrade("my_mod_capacity", {

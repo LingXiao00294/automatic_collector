@@ -15,6 +15,8 @@ def lua():
     runtime = LuaRuntime(unpack_returned_tuples=True)
     runtime.execute(f'package.path = "{ROOT.as_posix()}/scripts/?.lua;" .. package.path')
     runtime.execute((ROOT / "tests/harness.lua").read_text(encoding="utf-8"))
+    runtime.globals().TEST_ROOT = ROOT.as_posix()
+    runtime.execute((ROOT / "tests/harness_upgrade.lua").read_text(encoding="utf-8"))
     return runtime
 
 
@@ -142,6 +144,21 @@ def test_lua_51_syntax():
         "farm_success_count_and_contact_safety",
         "farm_partial_failure_preserves_products",
         "farm_pause_save_restore_and_relocate",
+        "upgrade_single_and_stack",
+        "upgrade_two_players_and_reentry",
+        "upgrade_invalid_or_interrupted",
+        "upgrade_apply_rollback",
+        "upgrade_consumption_rollback",
+        "upgrade_detach_failure_and_cancel_recheck",
+        "upgrade_removed_during_apply_returns_kit",
+        "upgrade_actual_work_contacts_once",
+        "upgrade_walk_cargo_pause_boat",
+        "upgrade_contact_before_and_after",
+        "upgrade_store_closes_only_own_opener",
+        "upgrade_load_idempotent_and_relocate",
+        "upgrade_work_timing_and_walk_reset",
+        "upgrade_recipe_and_action_selection",
+        "upgrade_prefab_client_and_host",
     ],
 )
 def test_scenario(lua, scenario):

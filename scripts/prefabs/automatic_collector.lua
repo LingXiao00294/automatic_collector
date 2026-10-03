@@ -1,8 +1,12 @@
 local brain = require("brains/ac_collectorbrain")
+local Upgrades = require("ac_upgrades")
 local assets = {
     Asset("ANIM", "anim/automatic_collector.zip"),
+    Asset("ANIM", "anim/automatic_collector_mk2.zip"),
     Asset("ATLAS", "images/inventoryimages/automatic_collector.xml"),
     Asset("IMAGE", "images/inventoryimages/automatic_collector.tex"),
+    Asset("ATLAS", "images/inventoryimages/automatic_collector_mk2.xml"),
+    Asset("IMAGE", "images/inventoryimages/automatic_collector_mk2.tex"),
 }
 
 local function OnPickup(inst, owner)
@@ -49,6 +53,9 @@ local function fn()
     inst:AddTag("mech")
     inst:AddTag("NOBLOCK")
     inst._ac_enabled = net_bool(inst.GUID, "ac.enabled")
+    inst._ac_mk2 = net_bool(inst.GUID, "ac.mk2", "ac_mk2dirty")
+    inst.displaynamefn = Upgrades.DisplayName
+    inst:ListenForEvent("ac_mk2dirty", Upgrades.RefreshVisual)
     inst._ac_blocked = net_bool(inst.GUID, "ac.blocked")
     inst._ac_home_valid = net_bool(inst.GUID, "ac.home_valid")
     inst._ac_home_x = net_float(inst.GUID, "ac.home_x")
@@ -58,6 +65,7 @@ local function fn()
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
     inst.entity:SetPristine()
+    Upgrades.RefreshVisual(inst)
     if not TheWorld.ismastersim then return inst end
 
     inst:AddComponent("inspectable")

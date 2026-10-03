@@ -1,6 +1,18 @@
 require("stategraphs/commonstates")
+local Upgrades = require("ac_upgrades")
 
 local states = {
+    State {
+        name = "upgrade", tags = { "busy" },
+        onenter = function(inst)
+            inst.components.locomotor:StopMoving()
+            inst.AnimState:SetDeltaTimeMultiplier(1)
+            inst.AnimState:PlayAnimation("store")
+            inst.SoundEmitter:PlaySound("dontstarve/wilson/hammer")
+            inst.sg:SetTimeout(.4)
+        end,
+        ontimeout = function(inst) inst.sg:GoToState("idle") end,
+    },
     State {
         name = "idle", tags = { "idle", "canrotate" },
         onenter = function(inst)
@@ -59,7 +71,17 @@ table.insert(states, WorkState("hammer", "hammer", 1.3, .7, "dontstarve/wilson/h
 -- Native storage_robot stores on frame 6 and closes the chest on state exit.
 table.insert(states, WorkState("store", "store", 1, 6 * FRAMES, "dontstarve/wilson/pickup_reeds"))
 
-CommonStates.AddWalkStates(states, nil, { startwalk = "walk_pre", walk = "walk_loop", stopwalk = "walk_pst" })
+local function WalkEnter(inst)
+    inst.AnimState:SetDeltaTimeMultiplier(Upgrades.IsAdvanced(inst) and 2 or 1)
+end
+local function WalkExit(inst)
+    inst.AnimState:SetDeltaTimeMultiplier(1)
+end
+CommonStates.AddWalkStates(states, nil,
+    { startwalk = "walk_pre", walk = "walk_loop", stopwalk = "walk_pst" }, false, false, {
+        startonenter = WalkEnter, walkonenter = WalkEnter, endonenter = WalkEnter,
+        startonexit = WalkExit, walkonexit = WalkExit, endonexit = WalkExit,
+    })
 
 return StateGraph("ac_collector", states, {
     CommonHandlers.OnLocomote(false, true),

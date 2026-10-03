@@ -40,6 +40,8 @@ local function entity(prefab, x, tags)
     local e = { prefab = prefab, x = x or 0, z = 0, tags = {}, components = {}, events = {}, valid = true }
     for _, tag in ipairs(tags or {}) do e.tags[tag] = true end
     function e:IsValid() return self.valid end
+    function e:Remove() self.valid = false end
+    function e:AddTag(tag) self.tags[tag] = true end
     function e:HasTag(tag) return self.tags[tag] == true end
     function e:HasAnyTag(list) for _, tag in ipairs(list) do if self:HasTag(tag) then return true end end return false end
     function e:IsInLimbo() return self:HasTag("INLIMBO") end
@@ -135,7 +137,11 @@ local function inventory(owner)
         end
         self.active = item item.components.inventoryitem.owner = self.owner return true
     end
-    function inv:RemoveItem(item)
+    function inv:RemoveItem(item, wholestack)
+        if wholestack == false and item.components.stackable ~= nil
+            and item.components.stackable:StackSize() > 1 then
+            return item.components.stackable:Get(1)
+        end
         for i, value in pairs(self.items) do if value == item then self.items[i] = nil item.components.inventoryitem.owner = nil return item end end
         if self.active == item then self.active = nil item.components.inventoryitem.owner = nil return item end
     end
@@ -189,6 +195,7 @@ end
 local function item(prefab, x, tags, count)
     local e = entity(prefab or "twigs", x, tags)
     e.components.inventoryitem = { canbepickedup = true, cangoincontainer = true,
+        GetGrandOwner = function(self) return self.owner end,
         IsHeld = function(self) return self.owner ~= nil end }
     local stack = { stacksize = count or 1, maxsize = 40 }
     function stack:StackSize() return self.stacksize end
@@ -536,7 +543,12 @@ end
 -- Execute the actual stategraph callbacks and test animation impact synchronisation.
 package.preload["stategraphs/commonstates"] = function()
     CommonHandlers = { OnLocomote = function() return {} end }
-    CommonStates = { AddWalkStates = function() end }
+    CommonStates = { AddWalkStates = function(states, _, _, _, _, fns)
+        for _, entry in ipairs({ {"walk_start", "start"}, {"walk", "walk"}, {"walk_stop", "end"} }) do
+            table.insert(states, { name = entry[1], onenter = fns[entry[2] .. "onenter"],
+                onexit = fns[entry[2] .. "onexit"] })
+        end
+    end }
 end
 State = function(s) return s end
 ActionHandler = function(a,s) return {action=a,state=s} end
@@ -1967,3 +1979,7 @@ function scenarios.farm_pause_save_restore_and_relocate()
     local legacy = worker() legacy:OnLoad({enabled=true})
     assert(legacy.farm_count == 0 and not legacy.farm_draining)
 end
+
+upgrade_contract = { entity = entity, worker = worker, item = item, inventory = inventory,
+    setup = setup, chest = chest, plant = plant, enter = enter, walk_to = walk_to,
+    execute = execute, states = states, giant = giant, farm_crop = farm_crop }

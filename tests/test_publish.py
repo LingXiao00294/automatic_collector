@@ -18,7 +18,12 @@ def repository(tmp_path: Path) -> Path:
         "LICENSE": "MIT",
         "scripts/components/ac_worker.lua": "return {}",
         "anim/automatic_collector.zip": "Existing engine animation archive",
+        "anim/automatic_collector_mk2.zip": "Upgraded engine animation archive",
+        "anim/ac_upgrade_kit.zip": "Kit engine animation archive",
+        "scripts/prefabs/ac_upgrade_kit.lua": "return {}",
         "images/inventoryimages/automatic_collector.tex": "KTEX",
+        "images/inventoryimages/ac_upgrade_kit.tex": "KTEX kit",
+        "images/map_icons/automatic_collector_mk2.tex": "KTEX upgraded map icon",
         "docs/API.md": "Must not ship",
         "docs/engine.log": "Must not ship",
         "docs/notes.txt": "Must not ship",
@@ -44,7 +49,12 @@ def test_publish_copies_only_release_files(repository: Path):
         "LICENSE",
         "scripts/components/ac_worker.lua",
         "anim/automatic_collector.zip",
+        "anim/automatic_collector_mk2.zip",
+        "anim/ac_upgrade_kit.zip",
+        "scripts/prefabs/ac_upgrade_kit.lua",
         "images/inventoryimages/automatic_collector.tex",
+        "images/inventoryimages/ac_upgrade_kit.tex",
+        "images/map_icons/automatic_collector_mk2.tex",
     }
     actual = {path.relative_to(output).as_posix() for path in output.rglob("*") if path.is_file()}
     assert actual == expected
