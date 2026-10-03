@@ -1,10 +1,12 @@
 local Targets = require("ac_targets")
+local Upgrades = require("ac_upgrades")
 
 local Worker = Class(function(self, inst)
     self.inst = inst
     self.config = TUNING.AUTOMATIC_COLLECTOR
     self.radius = self.config.radius
     self.enabled = true
+    self.harvest_enabled = true
     self.home = nil
     self.homeplatform = nil
     self.homelocal = nil
@@ -110,6 +112,7 @@ function Worker:GetPickupCount(target)
 end
 
 function Worker:CanHarvest(target, kind)
+    if not self:IsHarvestEnabled() then return false end
     if kind == "hammer" then return self:GetCargo() == nil end
     if Targets.IsFarmWork(target, kind) then
         -- Products are harvested to the ground. Only real pickup/delivery checks
@@ -264,6 +267,22 @@ function Worker:SetEnabled(value)
     self.inst:PushEvent("ac_enabledchanged", { enabled = self.enabled })
 end
 
+function Worker:IsHarvestEnabled()
+    return Upgrades.IsAdvanced(self.inst) and self.harvest_enabled
+end
+
+function Worker:SetHarvestEnabled(value)
+    self.harvest_enabled = value == true
+    self.inst._ac_harvest_enabled:set(self.harvest_enabled)
+    if not self:IsHarvestEnabled() and self.pending ~= nil
+        and self.pending.kind ~= "pickup" and self.pending.kind ~= "store" then
+        -- Switching collection off releases only unfinished harvesting work.
+        self:Cancel(true)
+    end
+    self.nextscan = 0
+    self.inst:PushEvent("ac_harvestenabledchanged", { enabled = self.harvest_enabled })
+end
+
 -- Upgrade hooks intentionally change timing rather than skip animations.
 function Worker:SetActionSpeed(multiplier)
     self.action_speed = math.max(.25, math.min(4, multiplier))
@@ -315,14 +334,15 @@ function Worker:GetNextAction()
     local target, kind, action, cargo
     cargo = self:GetCargo()
     local entities = Targets.GetWorkEntities(self)
-    if cargo == nil and not self.farm_draining then
+    local harvesting = self:IsHarvestEnabled()
+    if harvesting and cargo == nil and not self.farm_draining then
         target, kind, action = Targets.FindWork(self, "farm", entities)
         if target == nil and self.farm_count > 0 then
             -- Finish a short batch when no mature crop remains.
             self.farm_draining = true
         end
     end
-    if target == nil and self.farm_draining then
+    if harvesting and target == nil and self.farm_draining then
         target, kind, action = Targets.FindWork(self, "drain", entities)
         if target == nil and cargo == nil then
             -- Leave currently undeliverable drops on the ground and resume work.
@@ -332,7 +352,8 @@ function Worker:GetNextAction()
         end
     end
     if target == nil then
-        target, kind, action = Targets.FindWork(self, self.farm_draining and "drain" or "normal", entities)
+        target, kind, action = Targets.FindWork(self,
+            (not harvesting or self.farm_draining) and "drain" or "normal", entities)
     end
     if cargo ~= nil then
         if target == nil then
@@ -404,7 +425,8 @@ function Worker:OnDropped()
 end
 
 function Worker:OnSave()
-    local data = { enabled = self.enabled, carryslots = self:GetCarrySlots(),
+    local data = { enabled = self.enabled, harvest_enabled = self.harvest_enabled,
+        carryslots = self:GetCarrySlots(),
         farm_count = self.farm_count, farm_draining = self.farm_draining }
     if self.home ~= nil then
         data.home = { x = self.home.x, z = self.home.z }
@@ -425,12 +447,20 @@ end
 function Worker:OnLoad(data)
     if data == nil then return end
     self:OnPreLoad(data)
-    self.enabled = data.enabled ~= false
+    if data.harvest_enabled == nil then
+        -- The old player pause becomes a harvest preference; transport resumes.
+        self.enabled = true
+        self.harvest_enabled = data.enabled ~= false
+    else
+        self.enabled = data.enabled ~= false
+        self.harvest_enabled = data.harvest_enabled ~= false
+    end
     local count = data.farm_count
     self.farm_count = type(count) == "number" and count == count
         and math.max(0, math.min(5, math.floor(count))) or 0
     self.farm_draining = data.farm_draining == true or self.farm_count >= 5
     self.inst._ac_enabled:set(self.enabled)
+    self.inst._ac_harvest_enabled:set(self.harvest_enabled)
     if data.home ~= nil then
         self.home = Vector3(data.home.x, 0, data.home.z)
     end
@@ -452,7 +482,8 @@ function Worker:OnRemoveFromEntity()
 end
 
 function Worker:GetDebugString()
-    return string.format("enabled=%s cargo=%s job=%s farm=%d/5 draining=%s", tostring(self.enabled),
+    return string.format("enabled=%s harvest=%s cargo=%s job=%s farm=%d/5 draining=%s", tostring(self.enabled),
+        tostring(self:IsHarvestEnabled()),
         tostring(self:GetCargo() ~= nil), self.pending ~= nil and self.pending.kind or "idle",
         self.farm_count, tostring(self.farm_draining))
 end

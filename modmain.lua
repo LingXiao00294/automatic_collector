@@ -1,6 +1,7 @@
 PrefabFiles = { "automatic_collector", "ac_upgrade_kit" }
 
 local G = GLOBAL
+local Upgrades = require("ac_upgrades")
 G.TUNING.AUTOMATIC_COLLECTOR = {
     radius = GetModConfigData("work_radius") or 12,
     matching_only = GetModConfigData("matching_only") == true,
@@ -64,6 +65,40 @@ AddRecipe2("ac_upgrade_kit", {
     image = "ac_upgrade_kit.tex",
 }, { "SCIENCE", "STRUCTURES" })
 
+-- Mouse-only scene action. Native action-button scans require canbepickedup.
+local pickup = AddAction("AC_PICKUP", "捡起", function(act)
+    local target, doer = act.target, act.doer
+    local item = target ~= nil and target.components.inventoryitem or nil
+    local inventory = doer ~= nil and doer.components.inventory or nil
+    if item == nil or inventory == nil or not target:IsValid() or not doer:IsValid()
+        or not target:HasTag("automatic_collector") or target:IsInLimbo() or item:IsHeld()
+        or not doer:HasTag("player") or doer:HasTag("playerghost")
+        or target:HasTag("fire") then
+        return false
+    end
+    if doer.components.itemtyperestrictions ~= nil
+        and not doer.components.itemtyperestrictions:IsAllowed(target) then
+        return false, "restriction"
+    end
+    doer:PushEvent("onpickupitem", { item = target })
+    inventory:GiveItem(target, nil, target:GetPosition())
+    return true
+end)
+pickup.priority = G.ACTIONS.PICKUP.priority
+pickup.mount_valid = G.ACTIONS.PICKUP.mount_valid
+pickup.extra_arrive_dist = G.ACTIONS.PICKUP.extra_arrive_dist
+strings.CHARACTERS.GENERIC.ACTIONFAIL.AC_PICKUP = strings.CHARACTERS.GENERIC.ACTIONFAIL.PICKUP
+AddComponentAction("SCENE", "inventoryitem", function(inst, doer, actions, right)
+    local inventory = doer ~= nil and doer.replica ~= nil and doer.replica.inventory or nil
+    if not right and inst:HasTag("automatic_collector") and not inst:HasTag("INLIMBO")
+        and not inst:HasTag("fire") and inventory ~= nil and inventory:GetNumSlots() > 0
+        and doer:HasTag("player") and not doer:HasTag("playerghost") then
+        table.insert(actions, pickup)
+    end
+end)
+AddStategraphActionHandler("wilson", G.ActionHandler(pickup, "doshortaction"))
+AddStategraphActionHandler("wilson_client", G.ActionHandler(pickup, "doshortaction"))
+
 local upgrade = AddAction("AC_UPGRADE", "升级拾荒机", function(act)
     local installer = act.invobject ~= nil and act.invobject.components.ac_upgradeitem or nil
     if installer == nil then return false, "INVALID_TARGET" end
@@ -74,7 +109,7 @@ upgrade.rmb = true
 upgrade.mount_valid = true
 upgrade.distance = 2
 AddComponentAction("USEITEM", "ac_upgradeitem", function(inst, doer, target, actions, right)
-    -- Keep the action on upgraded cars so failure explains why and never toggles work.
+    -- Keep the action on upgraded cars so failure explains why and never toggles harvesting.
     if right and target ~= nil and target:HasTag("automatic_collector")
         and not target:HasTag("INLIMBO") then
         table.insert(actions, upgrade)
@@ -83,26 +118,28 @@ end)
 AddStategraphActionHandler("wilson", G.ActionHandler(upgrade, "doshortaction"))
 AddStategraphActionHandler("wilson_client", G.ActionHandler(upgrade, "doshortaction"))
 
-local toggle = AddAction("AC_TOGGLE", "暂停/启动", function(act)
+local toggle = AddAction("AC_TOGGLE", "切换采集", function(act)
     local worker = act.target ~= nil and act.target.components.ac_worker or nil
-    if worker == nil or act.target.components.inventoryitem:IsHeld() then
+    if worker == nil or not act.target:IsValid() or not Upgrades.IsAdvanced(act.target)
+        or act.target:HasTag("INLIMBO") or act.target.components.inventoryitem:IsHeld() then
         return false
     end
-    worker:SetEnabled(not worker.enabled)
+    worker:SetHarvestEnabled(not worker.harvest_enabled)
     return true
 end)
 toggle.priority = 2
 toggle.rmb = true
 toggle.mount_valid = true
 toggle.strfn = function(act)
-    return act.target ~= nil and act.target._ac_enabled:value() and "STOP" or "START"
+    return act.target ~= nil and act.target._ac_harvest_enabled:value() and "STOP" or "START"
 end
-strings.ACTIONS.AC_TOGGLE = { STOP = "暂停采集", START = "启动采集" }
+strings.ACTIONS.AC_TOGGLE = { STOP = "关闭采集", START = "开启采集" }
 AddComponentAction("SCENE", "inspectable", function(inst, doer, actions, right)
     local inventory = doer ~= nil and doer.replica.inventory or nil
     local active = inventory ~= nil and inventory:GetActiveItem() or nil
     if active ~= nil and active:HasTag("ac_upgrade_kit") then return end
-    if right and inst:HasTag("automatic_collector") and not inst:HasTag("INLIMBO") then
+    if right and inst:HasTag("automatic_collector") and Upgrades.IsAdvanced(inst)
+        and not inst:HasTag("INLIMBO") then
         table.insert(actions, toggle)
     end
 end)
@@ -123,7 +160,7 @@ hammer.distance = 1.5
 -- Public registry: other mods can register adapters without changing base components.
 -- Built-in handlers use the same component methods exposed to integrations.
 G.AUTOMATIC_COLLECTOR_API = require("ac_api")
-require("ac_upgrades").Register()
+Upgrades.Register()
 
 -- Insight loads at a lower priority. Register once all modmain files have run,
 -- on both clients and servers, without requiring any third-party script.

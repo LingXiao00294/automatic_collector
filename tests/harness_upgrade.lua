@@ -272,18 +272,53 @@ end
 function scenarios.upgrade_contact_before_and_after()
     for _, hit in ipairs({ false, true }) do
         local w, player, _, installer = prepare()
-        local crop = H.plant(1) crop:AddTag("farm_plant")
+        local drop = H.item("twigs", 1, nil, 3)
+        w.farm_count = 2
         local action = w:GetNextAction()
-        local state = H.enter(w, action, "pick")
-        if hit then w.inst.sg.timeinstate = .7 state.onupdate(w.inst) end
+        local state = H.enter(w, action, "pickup")
+        if hit then w.inst.sg.timeinstate = .5 state.onupdate(w.inst) end
         -- enter's animation stub tracks only the work state; retain actual visuals for apply.
         visuals(w.inst)
         assert(installer:Install(player, w.inst))
-        assert(w.farm_count == (hit and 1 or 0) and (crop.harvests or 0) == (hit and 1 or 0))
-        assert(w.pending == nil and w.cooldowns[crop] == nil)
+        assert(w.farm_count == 2 and w:GetCargo() == (hit and drop or nil))
+        assert(w.pending == nil and w.cooldowns[drop] == nil and w:IsHarvestEnabled())
         assert(w.inst.sg.currentstate.name == "upgrade" and w.inst.sg.timeout == .4)
-        crop.valid = false
+        drop.valid = false
     end
+end
+
+function scenarios.harvest_toggle_upgrade_and_load_order()
+    local w, player, _, installer = prepare()
+    local crop = H.farm_crop(1)
+    assert(not w:IsHarvestEnabled() and w:GetNextAction() == nil)
+    assert(installer:Install(player, w.inst) and w:IsHarvestEnabled())
+    local action = w:GetNextAction()
+    assert(action.target == crop)
+    w:Cancel(true)
+    w.farm_count = 2
+    w:SetHarvestEnabled(false)
+    local current, levels = w:OnSave(), w.inst.components.ac_upgradable:OnSave()
+    assert(current.enabled and not current.harvest_enabled)
+    for _, data in ipairs({ current, { enabled = false, farm_count = 2 }, { enabled = true } }) do
+        for _, worker_first in ipairs({ false, true }) do
+            local restored = prepare()
+            if worker_first then restored:OnLoad(data) end
+            restored.inst.components.ac_upgradable:OnLoad(levels)
+            if not worker_first then restored:OnLoad(data) end
+            local expected = data.harvest_enabled ~= false and data.enabled ~= false
+            assert(restored.enabled and restored:IsHarvestEnabled() == expected)
+            assert(restored.inst._ac_enabled:value() and restored.inst._ac_harvest_enabled:value() == expected)
+            assert(restored.farm_count == (data.farm_count or 0))
+            restored:OnPickup(nil) restored:OnDropped()
+            assert(restored:IsHarvestEnabled() == expected)
+        end
+    end
+    local legacy_base = prepare()
+    legacy_base:OnLoad({ enabled = false, farm_count = 3, farm_draining = true })
+    assert(legacy_base.enabled and not legacy_base:IsHarvestEnabled())
+    local drop = H.item("twigs", 1)
+    assert(legacy_base:GetNextAction().target == drop)
+    assert(legacy_base.farm_count == 3 and legacy_base.farm_draining)
 end
 
 function scenarios.upgrade_prefab_client_and_host()
@@ -302,6 +337,7 @@ function scenarios.upgrade_prefab_client_and_host()
             "AddMiniMapEntity", "AddNetwork", "AddLight" }) do inst.entity[name] = function() end end
         inst.entity.SetPristine = function()
             assert(inst._ac_mk2 ~= nil or inst:HasTag("ac_upgrade_kit"))
+            assert(inst._ac_harvest_enabled ~= nil or inst:HasTag("ac_upgrade_kit"))
             assert(next(inst.components) == nil, "No authoritative components before SetPristine")
         end
         inst.Light = { SetRadius = function() end, Enable = function() end }
@@ -349,6 +385,7 @@ function scenarios.upgrade_prefab_client_and_host()
     TheWorld.ismastersim = false
     local client = prefab.fn()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
+    assert(client._ac_harvest_enabled:value())
     client._ac_mk2:set(true)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
     assert(client:displaynamefn() == "采集车")
@@ -357,20 +394,33 @@ function scenarios.upgrade_prefab_client_and_host()
     assert(late.bank == "automatic_collector_mk2" and late.components.ac_upgradable == nil)
     seed, TheWorld.ismastersim = false, true
     local host = prefab.fn()
+    assert(host.components.inventoryitem.canbepickedup == false,
+        "The action button must not pick up either car")
+    assert(not host.components.ac_worker:IsHarvestEnabled())
     host.components.ac_upgradable:OnLoad({ levels = { [Upgrades.CHASSIS] = 1 } })
     assert(host.bank == "automatic_collector_mk2" and host.components.locomotor.walkspeed == 6)
     assert(host.components.ac_worker.radius == 20 and host._ac_radius:value() == 20)
     assert(host.components.inventoryitem.atlasname == "images/inventoryimages/automatic_collector_mk2.xml")
     assert(host.components.inventoryitem.imagename == "automatic_collector_mk2")
+    assert(host.components.inventoryitem.canbepickedup == false)
+    host.components.ac_worker:SetHarvestEnabled(false)
+    assert(host.components.ac_worker.enabled and not host._ac_harvest_enabled:value())
+    host.components.ac_worker:SetHarvestEnabled(true)
     local Sounds = require("ac_sounds")
-    local loop, kills = false, 0
+    local loop, kills, signals = false, 0, {}
     host.SoundEmitter = {
-        PlaySound = function(_, _, channel) if channel == "ac_walk" then loop = true end end,
+        PlaySound = function(_, event, channel)
+            if channel == "ac_walk" then loop = true else table.insert(signals, event) end
+        end,
         KillSound = function(_, channel)
             assert(channel == "ac_walk") loop = false kills = kills + 1
         end,
     }
     Sounds.StartWalk(host)
+    host.components.ac_worker:SetHarvestEnabled(false)
+    host.components.ac_worker:SetHarvestEnabled(true)
+    assert(loop and kills == 0, "Collection changes must not stop transport's rolling sound")
+    assert(table.concat(signals, ",") == "ac_collector/metal/stop,ac_collector/metal/start")
     host.components.inventoryitem.onpickupfn(host, nil)
     assert(not loop and not host._ac_walk_sound and kills == 1)
     Sounds.StartWalk(host)
@@ -445,9 +495,9 @@ function scenarios.upgrade_work_timing_and_walk_reset()
 end
 
 -- Load the real modmain registration in a mod environment (without a running game).
-function scenarios.upgrade_recipe_and_action_selection()
+local function register_modmain()
     local callbacks, recipes, handlers = {}, {}, {}
-    GLOBAL = { TUNING = TUNING, STRINGS = { NAMES = {}, RECIPE_DESC = {}, ACTIONS = {},
+    GLOBAL = { TUNING = TUNING, ACTIONS = ACTIONS, STRINGS = { NAMES = {}, RECIPE_DESC = {}, ACTIONS = {},
         CHARACTERS = { GENERIC = { DESCRIBE = {}, ACTIONFAIL = {} } } },
         Ingredient = function(name, count) return { name = name, count = count } end,
         TECH = { SCIENCE_TWO = {} }, ActionHandler = ActionHandler }
@@ -463,6 +513,11 @@ function scenarios.upgrade_recipe_and_action_selection()
     AddComponentAction = function(context, name, fn) callbacks[context .. ":" .. name] = fn end
     AddStategraphActionHandler = function(name, handler) handlers[name .. ":" .. handler.action.id] = handler.state end
     assert(loadfile(TEST_ROOT .. "/modmain.lua"))()
+    return callbacks, recipes, handlers
+end
+
+function scenarios.upgrade_recipe_and_action_selection()
+    local callbacks, recipes, handlers = register_modmain()
     local recipe = recipes.ac_upgrade_kit
     assert(recipe.tech == GLOBAL.TECH.SCIENCE_TWO)
     for i, expected in ipairs({ {"thulecite", 10}, {"wagpunk_bits", 3}, {"moonrocknugget", 5} }) do
@@ -472,8 +527,11 @@ function scenarios.upgrade_recipe_and_action_selection()
     assert(handlers["wilson_client:AC_UPGRADE"] == "doshortaction")
     local w, player, kit = prepare(2)
     player.replica = { inventory = player.components.inventory }
-    player.components.inventory.active = kit
     local actions = {}
+    callbacks["SCENE:inspectable"](w.inst, player, actions, true)
+    assert(#actions == 0, "Base cars must not offer a player toggle")
+    assert(not ACTIONS.AC_TOGGLE.fn({ doer = player, target = w.inst }) and w.enabled)
+    player.components.inventory.active = kit
     callbacks["USEITEM:ac_upgradeitem"](kit, player, w.inst, actions, true)
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
     assert(#actions == 1 and actions[1] == ACTIONS.AC_UPGRADE)
@@ -487,4 +545,89 @@ function scenarios.upgrade_recipe_and_action_selection()
     player.components.inventory.active = nil
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
     assert(#actions == 1 and actions[1] == ACTIONS.AC_TOGGLE)
+    assert(handlers["wilson:AC_TOGGLE"] == "doshortaction")
+    assert(handlers["wilson_client:AC_TOGGLE"] == "doshortaction")
+    assert(GLOBAL.STRINGS.ACTIONS.AC_TOGGLE.STOP == "关闭采集")
+    assert(GLOBAL.STRINGS.ACTIONS.AC_TOGGLE.START == "开启采集")
+    local toggle, act = actions[1], { doer = player, target = w.inst }
+    assert(toggle.strfn(act) == "STOP" and toggle.fn(act))
+    assert(w.enabled and not w.harvest_enabled and toggle.strfn(act) == "START")
+    assert(toggle.fn(act) and w.enabled and w:IsHarvestEnabled())
+    w.inst.held = true
+    assert(not toggle.fn(act) and w.harvest_enabled)
+    w.inst.held = false w.inst:AddTag("INLIMBO")
+    actions = {}
+    callbacks["SCENE:inspectable"](w.inst, player, actions, true)
+    assert(#actions == 0 and not toggle.fn(act))
+    w.inst.tags.INLIMBO = nil w.inst.valid = false
+    assert(not toggle.fn(act))
+    assert(not toggle.fn({ doer = player }))
+    local client = H.entity("automatic_collector", 0, { "automatic_collector" })
+    client._ac_mk2:set(true) client._ac_harvest_enabled:set(false)
+    actions = {}
+    callbacks["SCENE:inspectable"](client, player, actions, true)
+    assert(#actions == 1 and toggle.strfn({ target = client }) == "START")
+    assert(not toggle.fn({ doer = player, target = client }))
+    actions = {}
+    callbacks["SCENE:inspectable"](client, player, actions, false)
+    assert(#actions == 0)
+end
+
+function scenarios.collector_mouse_pickup()
+    local callbacks, _, handlers = register_modmain()
+    local pickup = ACTIONS.AC_PICKUP
+    assert(pickup ~= nil and pickup.priority == ACTIONS.PICKUP.priority)
+    assert(pickup.mount_valid == ACTIONS.PICKUP.mount_valid)
+    assert(pickup.extra_arrive_dist == ACTIONS.PICKUP.extra_arrive_dist)
+    assert(handlers["wilson:AC_PICKUP"] == "doshortaction")
+    assert(handlers["wilson_client:AC_PICKUP"] == "doshortaction")
+    for _, advanced in ipairs({ false, true }) do
+        local x = advanced and 100 or 0
+        local w, player = prepare(1, H.worker(x, false))
+        if advanced then assert(w.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 1)) end
+        player.x = x
+        player.components.inventory.maxslots = 3
+        player.replica = { inventory = player.components.inventory }
+        local cargo = H.item("twigs", x, nil, 7)
+        w.inst.components.inventory:GiveItem(cargo)
+        local receiver = H.chest(x + 5)
+        local action = w:GetNextAction()
+        assert(action.target == receiver)
+        local failures = 0
+        action:AddFailAction(function() failures = failures + 1 end)
+        local actions = {}
+        callbacks["SCENE:inventoryitem"](w.inst, player, actions, false)
+        assert(#actions == 1 and actions[1] == pickup)
+        actions = {}
+        callbacks["SCENE:inventoryitem"](w.inst, player, actions, true)
+        assert(#actions == 0, "Right click must never pick up a car")
+        callbacks["SCENE:inventoryitem"](H.item("flint", x), player, actions, false)
+        assert(#actions == 0, "Other items keep their native pickup actions")
+        w.inst:AddTag("INLIMBO")
+        callbacks["SCENE:inventoryitem"](w.inst, player, actions, false)
+        assert(#actions == 0 and not pickup.fn({ doer = player, target = w.inst }))
+        w.inst.tags.INLIMBO = nil
+        player.components.itemtyperestrictions = { IsAllowed = function() return false end }
+        assert(not pickup.fn({ doer = player, target = w.inst }) and w:GetCargo() == cargo)
+        player.components.itemtyperestrictions = nil
+        player:AddTag("playerghost")
+        callbacks["SCENE:inventoryitem"](w.inst, player, actions, false)
+        assert(#actions == 0 and not pickup.fn({ doer = player, target = w.inst }))
+        player.tags.playerghost = nil
+        -- Native inventory GiveItem invokes the item's pickup callback as it transfers ownership.
+        local give = player.components.inventory.GiveItem
+        player.components.inventory.GiveItem = function(self, target, ...)
+            if target == w.inst then w:OnPickup(player) end
+            return give(self, target, ...)
+        end
+        assert(pickup.fn({ doer = player, target = w.inst }))
+        assert(w:GetCargo() == nil and w.home == nil and w.pending == nil and failures == 1)
+        assert(cargo.components.inventoryitem.owner == player and cargo.components.stackable:StackSize() == 7)
+        assert(w.inst.components.inventoryitem.owner == player)
+        w.inst.held = true
+        assert(not pickup.fn({ doer = player, target = w.inst }))
+        assert(w.inst.components.inventoryitem.canbepickedup == false)
+        assert(not pickup.fn({ doer = player, target = H.item("rocks", x) }))
+        assert(not pickup.fn({ doer = player }))
+    end
 end

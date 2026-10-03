@@ -1,4 +1,5 @@
 local M = {}
+local Upgrades = require("ac_upgrades")
 local JOBS = { pickup = "拾取", pick = "采摘", harvest = "收获", hammer = "敲巨大作物", store = "运输" }
 
 function M.Describe(worker)
@@ -15,12 +16,16 @@ function M.Describe(worker)
         local stack = cargo.components.stackable
         cargo_text = string.format("%s × %d", name, stack ~= nil and stack:StackSize() or 1)
     end
+    local advanced = Upgrades.IsAdvanced(inst)
+    local collection = advanced and string.format("\n采集：%s\n农作物批次：%s",
+        worker:IsHarvestEnabled() and "开启" or "关闭，仅拾取与运输",
+        worker.farm_draining and "拾取与运输" or string.format("采摘 %d/5", worker.farm_count))
+        or "\n功能：拾取与运输"
     return {
         name = "ac_worker",
         priority = 10,
-        description = string.format("拾荒机：%s\n农作物批次：%s\n工作半径：%g（约 %g 块地皮）\n货物：%s\n运输槽：%d\n运输规则：%s",
-            status, worker.farm_draining and "拾取与运输"
-                or string.format("采摘 %d/5", worker.farm_count),
+        description = string.format("%s：%s%s\n工作半径：%g（约 %g 块地皮）\n货物：%s\n运输槽：%d\n运输规则：%s",
+            advanced and "采集车" or "拾荒机", status, collection,
             worker.radius, worker.radius / 4, cargo_text, worker:GetCarrySlots(),
             worker.config.matching_only and "仅已有同类样品的箱子" or "优先同类，也用空箱"),
     }

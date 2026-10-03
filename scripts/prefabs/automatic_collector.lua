@@ -56,6 +56,7 @@ local function fn()
     inst:AddTag("mech")
     inst:AddTag("NOBLOCK")
     inst._ac_enabled = net_bool(inst.GUID, "ac.enabled")
+    inst._ac_harvest_enabled = net_bool(inst.GUID, "ac.harvest_enabled")
     inst._ac_mk2 = net_bool(inst.GUID, "ac.mk2", "ac_mk2dirty")
     inst.displaynamefn = Upgrades.DisplayName
     inst:ListenForEvent("ac_mk2dirty", Upgrades.RefreshVisual)
@@ -67,6 +68,7 @@ local function fn()
     inst._ac_radius = net_float(inst.GUID, "ac.radius")
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
+    inst._ac_harvest_enabled:set(true)
     inst.entity:SetPristine()
     Upgrades.RefreshVisual(inst)
     if not TheWorld.ismastersim then return inst end
@@ -74,6 +76,8 @@ local function fn()
     inst:AddComponent("inspectable")
     inst.components.inspectable.getstatus = GetStatus
     inst:AddComponent("inventoryitem")
+    -- The native action button ignores non-pickup items; AC_PICKUP handles mouse clicks.
+    inst.components.inventoryitem.canbepickedup = false
     inst.components.inventoryitem.atlasname = "images/inventoryimages/automatic_collector.xml"
     inst.components.inventoryitem.imagename = "automatic_collector"
     inst.components.inventoryitem.nobounce = true
@@ -90,6 +94,7 @@ local function fn()
     inst:AddComponent("ac_worker")
     inst:AddComponent("ac_upgradable")
     inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
+    inst:ListenForEvent("ac_harvestenabledchanged", Sounds.OnEnabledChanged)
     inst:SetStateGraph("SGac_collector")
     inst:SetBrain(brain)
     inst.OnPreLoad = function(inst, data)

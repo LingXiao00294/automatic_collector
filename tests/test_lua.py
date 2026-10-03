@@ -1,7 +1,9 @@
 """Execute the shipped Lua in LuaJIT (the same Lua 5.1 dialect used by DST)."""
 
 import importlib
+import os
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -24,7 +26,12 @@ def lua():
 def test_lua_51_syntax():
     runtime = LuaRuntime()
     compile_lua = runtime.eval("function(source, name) return loadstring(source, name) end")
-    files = [ROOT / "modmain.lua", ROOT / "modinfo.lua", *ROOT.glob("scripts/**/*.lua")]
+    files = [
+        ROOT / "modmain.lua",
+        ROOT / "modinfo.lua",
+        *ROOT.glob("scripts/**/*.lua"),
+        ROOT / "tests/engine_smoke.lua",
+    ]
     for path in files:
         result = compile_lua(path.read_text(encoding="utf-8"), str(path))
         assert not isinstance(result, tuple), f"{path}: {result}"
@@ -150,6 +157,13 @@ def test_lua_51_syntax():
         "farm_success_count_and_contact_safety",
         "farm_partial_failure_preserves_products",
         "farm_pause_save_restore_and_relocate",
+        "scavenger_only_pickup_and_transport",
+        "harvest_toggle_cancels_gather_work",
+        "harvest_toggle_keeps_pickup_and_store",
+        "harvest_toggle_preserves_farm_batch",
+        "harvest_toggle_contact_revalidation",
+        "harvest_toggle_respects_config",
+        "harvest_toggle_upgrade_and_load_order",
         "upgrade_single_and_stack",
         "upgrade_two_players_and_reentry",
         "upgrade_invalid_or_interrupted",
@@ -167,7 +181,91 @@ def test_lua_51_syntax():
         "upgrade_work_timing_and_walk_reset",
         "upgrade_recipe_and_action_selection",
         "upgrade_prefab_client_and_host",
+        "collector_mouse_pickup",
     ],
 )
 def test_scenario(lua, scenario):
     lua.globals().scenarios[scenario]()
+
+
+@pytest.mark.parametrize("ismastersim", [False, True])
+def test_native_action_button_skips_collectors(lua, ismastersim):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Optional native input contract check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        source = scripts.read("scripts/components/playercontroller.lua").decode("utf-8")
+    pickup = source[
+        source.index("local function GetPickupAction") : source.index(
+            "function PlayerController:IsDoingOrWorking"
+        )
+    ]
+    targets = source[
+        source.index("local TARGET_EXCLUDE_TAGS =") : source.index(
+            "function PlayerController:GetActionButtonAction"
+        )
+    ]
+    action_button = source[
+        source.index("function PlayerController:GetActionButtonAction") : source.index(
+            "function PlayerController:DoActionButton"
+        )
+    ]
+    lua.globals().INPUT_IS_MASTER = ismastersim
+    lua.execute("""
+        PlayerController = {}
+        CONTROL_ACTION = 1
+        EQUIPSLOTS = { HANDS = "hands" }
+        TOOLACTIONS = {}
+        CanEntitySeeTarget = function(_, target) return target ~= nil and target:IsValid() end
+        TheSim.RegisterFindTags = function() return {} end
+        FindEntity = function(inst, radius, filter, must, exclude)
+            local x, y, z = inst.Transform:GetWorldPosition()
+            for _, target in ipairs(TheSim:FindEntities(x, y, z, radius, must, exclude)) do
+                if target ~= inst and (filter == nil or filter(target, inst)) then return target end
+            end
+        end
+    """)
+    lua.execute(pickup + targets + action_button)
+    lua.execute("""
+        local H = upgrade_contract
+        function PlayerController:IsEnabled() return true, false end
+        function PlayerController:IsBusy() return false end
+        function PlayerController:IsDoingOrWorking() return false end
+        function PlayerController:HasItemSlots() return true end
+        for _, directwalking in ipairs({ false, true }) do
+            for _, advanced in ipairs({ false, true }) do
+                local x = (advanced and 100 or 0) + (directwalking and 20 or 0)
+                local car = H.worker(x, advanced).inst
+                car.entity = { IsVisible = function() return true end }
+                car:AddTag("_inventoryitem")
+                assert(car.components.inventoryitem.canbepickedup == false)
+                car.replica = { inventoryitem = {
+                    CanBePickedUp = function() return car.components.inventoryitem.canbepickedup end,
+                } }
+                local player = H.entity("wilson", x, { "player" })
+                player.replica = { inventory = {
+                    IsFloaterHeld = function() return false end,
+                    IsHeavyLifting = function() return false end,
+                    GetEquippedItem = function() return nil end,
+                } }
+                local controller = setmetatable({ inst = player, remote_controls = {},
+                    ismastersim = INPUT_IS_MASTER, directwalking = directwalking },
+                    { __index = PlayerController })
+                -- The car is the first nearby candidate; normal drops must still be selected.
+                local drop = H.item("twigs", x + 1)
+                drop:AddTag("_inventoryitem")
+                drop.entity = { IsVisible = function() return true end }
+                drop.replica = { inventoryitem = { CanBePickedUp = function() return true end } }
+                local action = controller:GetActionButtonAction()
+                assert(action ~= nil and action.target == drop and action.action == ACTIONS.PICKUP)
+                assert(controller:GetActionButtonAction(car) == nil,
+                    "Action-button RPC must reject an explicitly requested car")
+                drop.valid = false
+                assert(controller:GetActionButtonAction() == nil,
+                    "A lone car must never be selected by the action button")
+            end
+        end
+    """)
