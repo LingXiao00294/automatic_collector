@@ -24,6 +24,7 @@
 | `assets/source/` | 原创车身贴图、`rig.json`、音源 WAV 与 FDP |
 | `assets/generated/` | 可编辑 SCML、图集、GIF 和预览，构建时覆盖 |
 | `anim/`、`images/`、`sound/`、`modicon.*` | 游戏直接加载的编译资源 |
+| `preview.jpg` | 创意工坊封面宣传插画 |
 | `tests/` | LuaJIT 行为场景、资源与发行检查 |
 | `tools/` | 美术与音效构建、发行和隔离服务器验证工具 |
 
@@ -76,7 +77,9 @@ uv run tools/publish.py
 
 脚本先验证源文件，再清空固定的 `publish/` 并复制发行文件，保留目录结构，不生成发行压缩包或 `dist/`。不要在 `publish/` 保存手动修改。源文件缺失时保留上一份发行；输出目录为符号链接、Junction 或普通文件时拒绝覆盖。
 
-发行白名单为 `modinfo.lua`、`modmain.lua`、`modicon.xml`、`modicon.tex`、`README.md`、`LICENSE`，以及 `scripts/`、`anim/`、`images/`、`sound/`。动画 ZIP 是游戏必需的编译资源，会原样复制。`docs/`、美术源、测试、构建工具、参考脚本、存档及缓存均不发行。
+发行白名单为 `modinfo.lua`、`modmain.lua`、`modicon.xml`、`modicon.tex`、`preview.jpg`、`README.md`、`LICENSE`，以及 `scripts/`、`anim/`、`images/`、`sound/`。动画 ZIP 是游戏必需的编译资源，会原样复制。`docs/`、美术源、测试、构建工具、参考脚本、存档及缓存均不发行。
+
+工坊封面保存在根目录 `preview.jpg`。更新封面后重新运行发行脚本，在上传工具的 `Update Preview Image` 中选择 `publish/preview.jpg`。封面使用方形 JPEG，文件保持小于 1 MB；它是宣传插画，并非游戏截图。
 
 将 `publish/` 的内容复制到游戏的 `mods/automatic_collector/`。发布新模组版本时同步 `modinfo.lua`、`pyproject.toml`、锁文件中的项目版本及 README；文档整理不单独提升模组版本。
 

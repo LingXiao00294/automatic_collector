@@ -14,6 +14,7 @@ def repository(tmp_path: Path) -> Path:
         "modmain.lua": "PrefabFiles = {}",
         "modicon.xml": "<Atlas />",
         "modicon.tex": "KTEX",
+        "preview.jpg": "Workshop cover image",
         "README.md": "Installation instructions",
         "LICENSE": "MIT",
         "scripts/components/ac_worker.lua": "return {}",
@@ -47,6 +48,7 @@ def test_publish_copies_only_release_files(repository: Path):
         "modmain.lua",
         "modicon.xml",
         "modicon.tex",
+        "preview.jpg",
         "README.md",
         "LICENSE",
         "scripts/components/ac_worker.lua",
@@ -84,13 +86,16 @@ def test_publish_removes_stale_files(repository: Path):
     assert (output / "modmain.lua").read_text(encoding="utf-8") == "Updated"
 
 
-def test_missing_source_preserves_previous_release(repository: Path):
+@pytest.mark.parametrize("missing_source", ["modmain.lua", "preview.jpg"])
+def test_missing_source_preserves_previous_release(repository: Path, missing_source: str):
     output = publish(repository)
     previous = (output / "modmain.lua").read_bytes()
-    (repository / "modmain.lua").unlink()
+    previous_preview = (output / "preview.jpg").read_bytes()
+    (repository / missing_source).unlink()
     with pytest.raises(FileNotFoundError):
         publish(repository)
     assert (output / "modmain.lua").read_bytes() == previous
+    assert (output / "preview.jpg").read_bytes() == previous_preview
 
 
 def test_publish_rejects_output_file(repository: Path):
