@@ -46,7 +46,7 @@ function M.Kind(worker, target)
         return nil
     end
     local workable = target.components.workable
-    if worker.config.hammer_giants and target:HasTag("oversized_veggie")
+    if worker:IsHarvestEnabled() and worker.config.hammer_giants and target:HasTag("oversized_veggie")
         and not (target.prefab ~= nil and target.prefab:match("_waxed$")) and workable ~= nil
         and workable:CanBeWorked() and workable:GetWorkAction() == ACTIONS.HAMMER then
         return "hammer", ACTIONS.AC_HAMMER
@@ -59,7 +59,7 @@ function M.Kind(worker, target)
         and (target.components.projectile == nil or not target.components.projectile:IsThrown()) then
         return "pickup", ACTIONS.PICKUP
     end
-    if not worker.config.pick_plants or not M.IsSafe(worker, target) then
+    if not worker:IsHarvestEnabled() or not worker.config.pick_plants or not M.IsSafe(worker, target) then
         return nil
     end
     local pickable = target.components.pickable

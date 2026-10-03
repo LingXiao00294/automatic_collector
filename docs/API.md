@@ -91,7 +91,7 @@ end
 
 普通资源的空载适配器作业会使用 `product` 返回的主产物寻找匹配样品箱；若未提供，则沿用目标自身的标准产物信息。具有上述农作物标签或组件的适配目标改走农作物批次流程，实际回调给到小车的所有产物通过原版 `DropItem` 完整落地，稍后按真实物品规则拾取运输。
 
-本版本状态机支持 `PICKUP`、`PICK`、`HARVEST`、`STORE` 和内部 `AC_HAMMER`，自定义资源通常返回 `PICK` 或 `HARVEST`。额外动作需由扩展对 `SGac_collector` 添加 handler，并提供动作动画和验证。适配器按注册名称排序；标准处理优先。关闭“自动采摘与收获”也会禁用采摘适配器。
+本版本状态机支持 `PICKUP`、`PICK`、`HARVEST`、`STORE` 和内部 `AC_HAMMER`，自定义资源通常返回 `PICK` 或 `HARVEST`。额外动作需由扩展对 `SGac_collector` 添加 handler，并提供动作动画和验证。适配器按注册名称排序；标准处理优先。普通拾荒机只执行拾取与运输，不调用采摘适配器；采集车关闭单车采集或服务器“自动采摘与收获”配置后，也不调用采摘适配器。单车采集关闭时同时禁用巨大作物敲击。
 
 ## 容器与排除
 
@@ -104,23 +104,34 @@ end
 - 自定义回调若依赖玩家专属字段，应自行允许该机器人，或为相应资源加 `ac_ignore`。
 - 已创建 `pending` 的采集/运输任务（行走及交互接触前）每 .1 秒复查并在动画接触时再次验证；任务成功、失败或取消后恢复 .5 秒待机巡检，待机选目标仍保持 .5 秒节流。高频巡检只验证当前任务及其接收条件，不重新扫描全部工作目标，也不因出现更优目标中断有效任务。巡检先发现目标失效时走 `Cancel(true)`，通知原版动作失败回调、释放占用并清理移动与状态机。原版移动组件先触发失败时，`Finish` 在释放任务前识别失效原因；两种顺序均不施加目标失败冷却，并解除扫描等待，不增加农作物成功计数。实际交互回调中的失败、目标仍有效的路径失败，以及超时/暂停取消保留既有冷却；返回中心的 `WALKTO` 不建立 `pending`，不启用高频巡检。
 
+## 玩家拾取
+
+两款车共用 `automatic_collector` prefab，原版 `inventoryitem.canbepickedup` 固定为 false，并由原版 replica 同步资格；升级和载入不恢复该值。原版 `GetActionButtonAction` 的自动扫描和指定目标/RPC 复查均因此跳过小车，其他物品仍使用原版动作选择。
+
+`AC_PICKUP` 只在小车的左键 `SCENE:inventoryitem` 候选中加入，右键不加入；使用原版拾取优先级、骑乘标志与额外到达距离，为 `wilson` / `wilson_client` 注册 `doshortaction`。服务端复查小车与玩家有效性、是否已收起、火焰、幽灵及 `itemtyperestrictions`，通过后发送原版 `onpickupitem` 事件并调用 `inventory:GiveItem`。小车自身的拾取回调继续取消任务、清除工作中心并交还真实货物。扩展应保持快捷拾取资格为 false，不覆盖原版全局拾取动作或输入方法。
+
 ## 服务端组件与事件
 
-`ac_worker`：`GetHome()`、`SetHome()`、`GetCargo()`、`SetEnabled(bool)`、`SetMoveSpeed(multiplier)`、`SetActionSpeed(multiplier)`、`GetCarrySlots()`、`SetCarrySlots(count)`。`GetCargo()` 返回当前待运输的一组货物，不是全部物品列表。运输槽由原版 `inventory` 持久化；不要给拾荒机增加可打开的 `container`。
+`ac_worker`：`GetHome()`、`SetHome()`、`GetCargo()`、`SetEnabled(bool)`、`IsHarvestEnabled()`、`SetHarvestEnabled(bool)`、`SetMoveSpeed(multiplier)`、`SetActionSpeed(multiplier)`、`GetCarrySlots()`、`SetCarrySlots(count)`。`GetCargo()` 返回当前待运输的一组货物，不是全部物品列表。运输槽由原版 `inventory` 持久化；不要给拾荒机增加可打开的 `container`。
 
-服务端内部 `farm_count` 为本批成功采摘数，`farm_draining` 为拾取运输阶段标志，均随组件存档保存。失败、取消和敲击不增加计数；暂停、休眠保留进度，拾取或重新放置重置。仅供观察，扩展应避免直接改写批次状态。农作物动作完成时使用任务内保存的类型，避免第三方回调重生、移除植株组件后漏记或漏放下产物。
+`IsHarvestEnabled()` 查询是否已升级且单车采集开启；具体采摘、收获与敲击还须通过对应服务器配置和目标验证。`SetHarvestEnabled(bool)` 保存单车采集偏好、同步 `_ac_harvest_enabled` 并解除扫描等待；关闭时仅以 `Cancel(true)` 取消采摘、收获、敲击及适配器任务，释放占用且不施加失败冷却，保持已有拾取/运输任务与货物。普通车即使设置为 true 也不能采集，升级后才应用该偏好。玩家 `AC_TOGGLE` 只对地面采集车提供，客户端提示读网络字段，服务端复查升级、有效性与是否已收起。
+
+`SetEnabled(bool)` 保留为扩展的全部作业启停接口，玩家右键不再调用。存档新增 `harvest_enabled`：有该字段时分别恢复完整启停与采集偏好；旧存档缺少该字段时恢复完整作业，将原 `enabled=false` 迁移为关闭采集，保证普通拾荒机恢复拾取运输。迁移不依赖组件加载顺序，采集能力仍在升级等级生效后判断。
+
+服务端内部 `farm_count` 为本批成功采摘数，`farm_draining` 为拾取运输阶段标志，均随组件存档保存。失败、取消和敲击不增加计数；关闭采集、完整暂停与休眠保留进度，拾取或重新放置重置。关闭采集时的拾取运输不改变批次，开启后继续原阶段；采集偏好在重新放置后保留。仅供观察，扩展应避免直接改写批次状态。农作物动作完成时使用任务内保存的类型，避免第三方回调重生、移除植株组件后漏记或漏放下产物。
 
 | 事件 | 数据 | 时机 |
 | --- | --- | --- |
 | `ac_jobsuccess` | `{ target, action }` | 一个目标的动作完成 |
 | `ac_jobfailed` | `{ target, action }` | 作业失败或中断 |
-| `ac_enabledchanged` | `{ enabled }` | 启停变化 |
+| `ac_enabledchanged` | `{ enabled }` | 扩展完整启停变化 |
+| `ac_harvestenabledchanged` | `{ enabled }` | 单车采集偏好变化 |
 | `ac_upgradechanged` | `{ name, level }` | 升级等级变化 |
 
-目标可能在动作成功时已经移除，不要直接访问无效实体。`_ac_enabled`、`_ac_blocked` 是仅用于显示的只读网络状态，不应由扩展客户端写入。
+目标可能在动作成功时已经移除，不要直接访问无效实体。`_ac_enabled`、`_ac_harvest_enabled`、`_ac_blocked` 是只读网络状态，不应由扩展客户端写入；`_ac_harvest_enabled` 为采集偏好，能力是否存在还需结合 `_ac_mk2`。
 
 ## Insight 显示接入
 
 `ac_insight` 在 `AddSimPostInit` 中检测 `GLOBAL.Insight.API.V1`，注册 `ac_worker` 组件描述器及 `automatic_collector` prefab 的 `OnSelect` / `OnUnselect`。不依赖工坊目录名，不导入或分发第三方脚本；未启用 Insight 时直接跳过。
 
-服务端描述器读取真实组件，并显示农作物批次进度与阶段；客户端范围显示只读取 `_ac_home_valid`、`_ac_home_x`、`_ac_home_z`、`_ac_home_platform`、`_ac_radius` 网络字段。无平台时坐标为世界坐标，有平台时为平台局部坐标；工作中心在放置、拾取和存档恢复时同步。范围圈使用客户端临时锚点，每 .1 秒更新平台位置，取消悬停或实体移除时清理，收起时隐藏。扩展客户端不得修改这些字段。
+服务端描述器读取真实组件：普通拾荒机显示拾取与运输能力，采集车另显示采集开关及农作物批次进度与阶段；客户端范围显示只读取 `_ac_home_valid`、`_ac_home_x`、`_ac_home_z`、`_ac_home_platform`、`_ac_radius` 网络字段。无平台时坐标为世界坐标，有平台时为平台局部坐标；工作中心在放置、拾取和存档恢复时同步。范围圈使用客户端临时锚点，每 .1 秒更新平台位置，取消悬停或实体移除时清理，收起时隐藏。扩展客户端不得修改这些字段。

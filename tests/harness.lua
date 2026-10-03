@@ -22,6 +22,9 @@ ACTIONS = {}
 for _, name in ipairs({ "PICKUP", "STORE", "PICK", "HARVEST", "HAMMER", "AC_HAMMER", "WALKTO" }) do
     ACTIONS[name] = { id = name, distance = 1.5 }
 end
+ACTIONS.PICKUP.priority = 1
+ACTIONS.PICKUP.mount_valid = true
+ACTIONS.PICKUP.extra_arrive_dist = function() return .25 end
 TUNING = { AUTOMATIC_COLLECTOR = { radius = 12, walkspeed = 3, pick_plants = true,
     hammer_giants = true, matching_only = false, action_timeout = 20, retry_delay = 10 } }
 local entities = {}
@@ -91,14 +94,20 @@ local function entity(prefab, x, tags)
         end
         action:Succeed() self.buffered = nil
     end
-    local function net() return { set = function(self, value) self.value = value end } end
+    local function net()
+        return { set = function(self, value) self.v = value end,
+            value = function(self) return self.v end }
+    end
     e._ac_enabled, e._ac_blocked = net(), net()
+    e._ac_mk2, e._ac_harvest_enabled = net(), net()
+    e._ac_harvest_enabled:set(true)
     table.insert(entities, e)
     return e
 end
 local function inventory(owner)
     local inv = { owner = owner, items = {}, maxslots = 1, closes = 0, opencontainers = {} }
     inv.itemslots = inv.items
+    function inv:GetNumSlots() return self.maxslots end
     function inv:GetFirstItemInAnySlot()
         for slot=1,self.maxslots do if self.items[slot] ~= nil then return self.items[slot] end end
     end
@@ -181,9 +190,13 @@ local Worker = require("components/ac_worker")
 local Targets = require("ac_targets")
 local Upgradable = require("components/ac_upgradable")
 local API = require("ac_api")
-local function worker(x)
+local function worker(x, advanced)
     local e = entity("automatic_collector", x, { "automatic_collector" })
-    e.components.inventoryitem = { IsHeld = function() return e.held == true end }
+    -- General component regressions exercise collection-capable cars.
+    -- Base-car and upgrade scenarios explicitly disable this capability.
+    e._ac_mk2:set(advanced ~= false)
+    e.components.inventoryitem = { canbepickedup = false,
+        IsHeld = function() return e.held == true end }
     e.components.inventory = inventory(e)
     e.components.locomotor = { Stop = function() end, Clear = function() end, StopMoving = function() end }
     e.sg = { GoToState = function() end }
@@ -267,8 +280,8 @@ local function plant(x, mature)
     e.components.pickable = pickable
     return e
 end
-local function setup()
-    local w = worker()
+local function setup(advanced)
+    local w = worker(nil, advanced)
     chest(5)
     return w
 end
@@ -1696,6 +1709,10 @@ function scenarios.insight_worker_information()
     local function description() return InsightCompat.Describe(w).description end
     assert(description():find("待机") and description():find("工作半径：12") and description():find("空载"))
     assert(description():find("采摘 0/5"))
+    assert(description():find("采集车") and description():find("采集：开启"))
+    w:SetHarvestEnabled(false)
+    assert(description():find("采集：关闭，仅拾取与运输") and not description():find("已暂停"))
+    w:SetHarvestEnabled(true)
     w.farm_draining = true assert(description():find("农作物批次：拾取与运输"))
     w.farm_draining = false
     w.inst.components.inventory:GiveItem(item("corn",0,nil,7))
@@ -1703,6 +1720,8 @@ function scenarios.insight_worker_information()
     w:SetEnabled(false) assert(description():find("已暂停"))
     w.inst.held = true assert(description():find("已收起"))
     w.inst.held = false w:SetEnabled(true) w.inst.asleep = true assert(description():find("休眠"))
+    local base = InsightCompat.Describe(worker(100, false)).description
+    assert(base:find("拾荒机") and base:find("功能：拾取与运输") and not base:find("农作物批次"))
 end
 
 local function range_nets(w)
@@ -2044,6 +2063,174 @@ function scenarios.farm_pause_save_restore_and_relocate()
     draining:OnDropped() assert(draining.farm_count == 0 and not draining.farm_draining)
     local legacy = worker() legacy:OnLoad({enabled=true})
     assert(legacy.farm_count == 0 and not legacy.farm_draining)
+end
+
+function scenarios.scavenger_only_pickup_and_transport()
+    local w = setup(false)
+    local resource, crop, fruit = plant(1), farm_crop(2), giant()
+    local legacy = entity("old_crop", 3)
+    legacy.components.crop = { matured = true, product_prefab = "carrot" }
+    local custom = entity("custom_resource", 4)
+    local matches = 0
+    API.RegisterAdapter("base_exclusion", {
+        match = function(_, target) matches = matches + 1 return target == custom end,
+        action = function() return ACTIONS.HARVEST end,
+    })
+    assert(not w:IsHarvestEnabled())
+    for _, target in ipairs({ resource, crop, fruit, legacy, custom }) do
+        assert(Targets.Kind(w, target) == nil and not w:CanHarvest(target, "pick"))
+    end
+    assert(matches == 0, "Base cars must not invoke harvest adapters")
+    local dropped = item("twigs", 1, nil, 3)
+    local action = w:GetNextAction()
+    assert(action.target == dropped and action.action == ACTIONS.PICKUP)
+    execute(w, action)
+    action = w:GetNextAction()
+    assert(action.action == ACTIONS.STORE)
+    local receiver = action.target
+    execute(w, action)
+    assert(receiver.components.container.stored.twigs == 3 and w:GetCargo() == nil)
+    assert(w:GetNextAction() == nil and resource.harvests == nil and crop.harvests == nil)
+    assert(fruit.components.workable.workleft == 3 and matches == 0)
+end
+
+function scenarios.harvest_toggle_cancels_gather_work()
+    for i, kind in ipairs({ "pick", "farm", "harvest", "hammer", "adapter" }) do
+        for _, walking in ipairs({ false, true }) do
+            local x = i * 100 + (walking and 40 or 0)
+            local w = worker(x)
+            chest(x + 5)
+            local target
+            if kind == "pick" then target = plant(x + 1)
+            elseif kind == "farm" then target = farm_crop(x + 1)
+            elseif kind == "hammer" then target = giant() target.x = x + 1
+            else
+                target = entity("custom_crop", x + 1)
+                if kind == "harvest" then
+                    target.components.crop = { matured = true, product_prefab = "carrot" }
+                else
+                    API.RegisterAdapter("toggle_adapter", {
+                        match = function(_, t) return t == target end,
+                        action = function() return ACTIONS.HARVEST end,
+                    })
+                end
+            end
+            local action = w:GetNextAction()
+            assert(action ~= nil and action.target == target)
+            w.farm_count = 3
+            local failures = 0
+            action:AddFailAction(function() failures = failures + 1 end)
+            if walking then walk_to(w, action) else
+                enter(w, action, kind == "hammer" and "hammer" or "pick")
+                w.inst.sg.timeinstate = .69
+            end
+            w:SetHarvestEnabled(false)
+            assert(w.enabled and not w:IsHarvestEnabled() and not w.inst._ac_harvest_enabled:value())
+            assert(w.pending == nil and w.inst.buffered == nil and failures == 1)
+            assert(not w:ValidateAction(action) and w.cooldowns[target] == nil)
+            assert(Targets.IsAvailable(worker(1000), target) and w.farm_count == 3)
+            action:Succeed() action:Fail()
+            assert(w.inst.mutations == nil and w.farm_count == 3)
+            assert(w:GetNextAction() == nil and w.farm_count == 3 and not w.farm_draining)
+            target.valid = false
+        end
+    end
+end
+
+function scenarios.harvest_toggle_keeps_pickup_and_store()
+    local w = setup()
+    local drop = item("twigs", 1, nil, 7)
+    plant(2)
+    local action = w:GetNextAction()
+    w.farm_count = 2
+    local state = enter(w, action, "pickup")
+    assert(action.target == drop)
+    w.inst.sg.timeinstate = .49
+    w:SetHarvestEnabled(false)
+    assert(w.pending.action == action and w:GetCargo() == nil and w.enabled)
+    w.inst.sg.timeinstate = .5 state.onupdate(w.inst)
+    assert(w:GetCargo() == drop and w.inst.mutations == 1)
+    state.onexit(w.inst) now = now + 1.1
+    action = w:GetNextAction()
+    state = enter(w, action, "store")
+    local receiver = action.target
+    w:SetHarvestEnabled(true) w:SetHarvestEnabled(false)
+    assert(w.pending.action == action and w:GetCargo() == drop and w:ValidateAction(action))
+    w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(receiver.components.container.stored.twigs == 7 and w:GetCargo() == nil)
+    assert(w.farm_count == 2 and not w.farm_draining and w.inst.mutations == 2)
+    -- Collection changes after STORE contact must leave its opening window intact.
+    w:SetHarvestEnabled(true)
+    assert(receiver.components.container:IsOpenedBy(w.inst))
+    state.onexit(w.inst)
+    assert(not receiver.components.container:IsOpenedBy(w.inst))
+    now = now + 1.1
+    assert(w:GetNextAction().action == ACTIONS.PICK)
+end
+
+function scenarios.harvest_toggle_preserves_farm_batch()
+    for _, draining in ipairs({ false, true }) do
+        local x = draining and 100 or 0
+        local w = worker(x)
+        chest(x + 5)
+        local crop = farm_crop(x + 1)
+        item("carrot", x + 2, nil, 3)
+        local count = draining and 5 or 2
+        w.farm_count, w.farm_draining = count, draining
+        w:SetHarvestEnabled(false)
+        execute(w, w:GetNextAction()) execute(w, w:GetNextAction())
+        assert(w:GetNextAction() == nil and crop.harvests == nil)
+        assert(w.farm_count == count and w.farm_draining == draining)
+        local data = w:OnSave()
+        local restored = worker(x)
+        restored:OnLoad(data)
+        assert(restored.enabled and not restored:IsHarvestEnabled())
+        assert(not restored.inst._ac_harvest_enabled:value() and restored:GetNextAction() == nil)
+        assert(restored.farm_count == count and restored.farm_draining == draining)
+        restored:SetHarvestEnabled(true)
+        restored.nextscan = 0
+        local action = restored:GetNextAction()
+        assert(action.target == crop and action.action == ACTIONS.PICK)
+        execute(restored, action)
+        assert(restored.farm_count == (draining and 1 or 3) and not restored.farm_draining)
+        restored:SetHarvestEnabled(false)
+        restored:OnPickup(nil) restored:OnDropped()
+        assert(restored.enabled and not restored:IsHarvestEnabled() and restored.farm_count == 0)
+    end
+end
+
+function scenarios.harvest_toggle_contact_revalidation()
+    for _, remove_upgrade in ipairs({ false, true }) do
+        local x = remove_upgrade and 100 or 0
+        local w = worker(x)
+        local target = farm_crop(x + 1)
+        local action = w:GetNextAction()
+        local state = enter(w, action, "pick")
+        -- Simulate capability changing before contact, independently of the setter's cancellation.
+        if remove_upgrade then w.inst._ac_mk2:set(false) else w.harvest_enabled = false end
+        w.inst.sg.timeinstate = .7 state.onupdate(w.inst)
+        assert(w.pending == nil and w.inst.mutations == nil and target.harvests == nil)
+        assert(w.farm_count == 0 and not w:IsHarvestEnabled())
+    end
+end
+
+function scenarios.harvest_toggle_respects_config()
+    local w = setup()
+    local resource, crop, fruit = plant(1), farm_crop(2), giant()
+    local custom = entity("mod_resource", 3)
+    local matches = 0
+    API.RegisterAdapter("toggle_config", {
+        match = function(_, target) matches = matches + 1 return target == custom end,
+        action = function() return ACTIONS.HARVEST end,
+    })
+    w.config.pick_plants = false
+    w:SetHarvestEnabled(false) w:SetHarvestEnabled(true)
+    for _, target in ipairs({ resource, crop, custom }) do assert(Targets.Kind(w, target) == nil) end
+    assert(matches == 0 and Targets.Kind(w, fruit) == "hammer")
+    w.config.hammer_giants = false
+    assert(Targets.Kind(w, fruit) == nil)
+    local dropped = item("twigs", 1)
+    assert(w:GetNextAction().target == dropped)
 end
 
 upgrade_contract = { entity = entity, worker = worker, item = item, inventory = inventory,
