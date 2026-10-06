@@ -124,6 +124,32 @@ def navigation(request):
     return runtime
 
 
+@pytest.mark.parametrize("runtime_module", ["lupa.lua51", "lupa.luajit21"])
+def test_prefab_and_navigation_with_engine_global_bit(runtime_module):
+    runtime = importlib.import_module(runtime_module).LuaRuntime(unpack_returned_tuples=True)
+    runtime.execute(f'package.path = "{ROOT.as_posix()}/scripts/?.lua;" .. package.path')
+    # DST supplies bit globally but does not provide a require("bit") module.
+    # LuaJIT's bundled module otherwise hides this prefab registration failure.
+    runtime.globals().bit = runtime.table(
+        band=lambda left, right: left & right,
+        bor=lambda left, right: left | right,
+    )
+    runtime.execute("""
+        package.loaded.bit, package.preload.bit = nil, nil
+        local original_require = require
+        require = function(name)
+            if name == "bit" then error("module 'bit' not found") end
+            return original_require(name)
+        end
+    """)
+    runtime.globals().TEST_ROOT = ROOT.as_posix()
+    for name in ("harness.lua", "harness_upgrade.lua"):
+        runtime.execute((ROOT / "tests" / name).read_text(encoding="utf-8"))
+    runtime.globals().scenarios.upgrade_prefab_client_and_host()
+    runtime.execute((ROOT / "tests/harness_navigation.lua").read_text(encoding="utf-8"))
+    runtime.globals().scenarios.navigation_collision_masks()
+
+
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_navigation_scenario(navigation, scenario):
     navigation.globals().scenarios[scenario]()

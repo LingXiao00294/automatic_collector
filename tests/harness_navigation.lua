@@ -2,7 +2,7 @@
 -- the fixture movement/action methods with the installed game's original ones.
 local H = upgrade_contract
 local Navigation = require("ac_navigation")
-local bit = require("bit")
+local bit = bit
 local time, ground = 0, function() return true end
 local pathground
 GetTime = function() return time end

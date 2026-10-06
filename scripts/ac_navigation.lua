@@ -1,5 +1,6 @@
 local M = {}
-local bit = require("bit")
+-- DST exposes bit globally; it has no require("bit") module.
+local bit = bit
 
 local GRID = .75
 local MAX_NODES = 4096
