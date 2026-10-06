@@ -4,7 +4,7 @@ local H = upgrade_contract
 local Navigation = require("ac_navigation")
 local bit = bit
 local time, ground = 0, function() return true end
-local pathground, pathwalls
+local pathground, pathwalls, overhang
 GetTime = function() return time end
 GetTick = function() return math.floor(time / FRAMES + .5) end
 GetTickTime = function() return FRAMES end
@@ -15,7 +15,9 @@ local CHARACTERS, OBSTACLES, ITEMS = 1024, 512, 256
 COLLISION = { CHARACTERS = CHARACTERS, OBSTACLES = OBSTACLES, ITEMS = ITEMS }
 local platforms = {}
 TheWorld = { ismastersim = true, Map = {}, Pathfinder = {} }
-function TheWorld.Map:IsPassableAtPoint(x, _, z) return ground(x, z) end
+function TheWorld.Map:IsPassableAtPoint(x, _, z)
+    return ground(x, z), overhang ~= nil and overhang(x, z) or false
+end
 function TheWorld.Map:GetPlatformAtPoint(x, _, z)
     for _, boat in ipairs(platforms) do
         if boat:IsValid() and boat:GetDistanceSqToPoint(Vector3(x,0,z)) <= boat.radius^2 then return boat end
@@ -1061,6 +1063,116 @@ end
 function scenarios.navigation_shore_pickup_tangent()
     local w,_,target = shore_worker(-.6,4)
     pickup_shore(w,target)
+end
+
+local function overhang_worker()
+    local w = H.worker(2) w.radius = 20
+    w.inst.x, w.inst.z = -.6,-.3
+    local loco = prepare(w)
+    local c = physics(H.chest(3),.5,OBSTACLES,CHARACTERS)
+    local desk = blocker(.3,0,.4) desk.prefab = "cartography_prototyper"
+    ground = function(x) return x >= -1.2 end
+    pathground = function(x) return x >= 0 end
+    overhang = function(x) return x < 0 end
+    return w,loco,c,desk
+end
+
+function scenarios.navigation_shore_overhang_pickup_delivery()
+    local w,loco,c = overhang_worker()
+    local target = H.item("rocks",-.8,nil,1) target.z = -.3
+    local pickup = begin(w)
+    assert(pickup.target == target and w.inst.buffered == pickup)
+    assert(w:ValidateAction(pickup)) w:PerformAction(pickup)
+    assert(w:GetCargo() == target and w.inst.x < 0,
+        "Pickup must reproduce cargo on visual land outside the native path tiles")
+    local delivery = begin(w)
+    assert(delivery.target == c and loco.dest ~= nil,
+        "A car beside the cartography desk must leave the overhang to deliver its cargo")
+    deliver(w,delivery)
+    assert(c.components.container.stored.rocks == 1 and target.components.inventoryitem.owner == c)
+    assert(w.last_failure == nil and w.inst.components.inventory.drops == nil and not w.blocked)
+end
+
+function scenarios.navigation_shore_overhang_approach_from_land()
+    local w = H.worker(2) local loco = prepare(w) local c = H.chest(4)
+    ground = function(x) return x >= -1.8 end
+    pathground = function(x) return x >= 0 end
+    overhang = function(x) return x < 0 end
+    local target = H.item("rocks",-1.35,nil,7)
+    local pickup = begin(w)
+    assert(loco.dest ~= nil, "A physically passable overhang must be reachable from a native land tile")
+    assert(arrive(w) == pickup and w:ValidateAction(pickup)) w:PerformAction(pickup)
+    assert(w.inst.x < 0 and w:GetCargo() == target)
+    deliver(w,begin(w))
+    assert(c.components.container.stored.rocks == 7 and target.components.inventoryitem.owner == c)
+end
+
+function scenarios.navigation_shore_overhang_home()
+    local w,loco = overhang_worker()
+    local action = begin(w)
+    assert(action.action == ACTIONS.WALKTO and loco.dest ~= nil,
+        "An empty car must also return from the visual shoreline to its work centre")
+    assert(arrive(w) == action and w.inst.x > 0 and w.pending == nil)
+end
+
+function scenarios.navigation_shore_overhang_water_gap()
+    local w,loco,c = overhang_worker()
+    -- A .2-unit real water gap is smaller than the ordinary .5-unit sampling
+    -- step. The visual-land fallback must check it at finer resolution.
+    ground = function(x) return x <= -.4 or x >= -.2 end
+    pathground = function(x) return x >= 0 end
+    local cargo = H.item("rocks",-.6,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and loco.dest == nil and w:IsCoolingDown(c),
+        "Visual shoreline recovery must never bridge real water")
+    assert(w:GetCargo() == cargo and cargo.components.stackable:StackSize() == 7)
+    assert(w.inst.x == -.6 and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.navigation_shore_overhang_inland_rejection()
+    local w,loco,c = overhang_worker()
+    ground = function(x) return x >= -1.2 end
+    pathground = function(x) return x >= 0 and (x <= 1 or x >= 1.5) end
+    local cargo = H.item("rocks",-.6,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and loco.dest == nil and w:IsCoolingDown(c),
+        "An overhang at the start must not bypass a native path rejection on inland terrain")
+    assert(w:GetCargo() == cargo and cargo.components.stackable:StackSize() == 7)
+end
+
+function scenarios.navigation_shore_overhang_refinement()
+    local w = H.worker(-.7) w.inst.z = -.5 w:SetHome() local loco = prepare(w)
+    local c = H.chest(3) c.z = .7
+    -- An L-shaped visual overhang has a .7-unit corridor. No static collider
+    -- requests refinement, and no coarse-grid row fits its horizontal exit.
+    ground = function(x,z)
+        return x >= 0 or (x >= -1.05 and x <= -.35 and z >= -1 and z <= 1.4)
+            or (x >= -1.05 and z >= .35 and z <= 1.05)
+    end
+    pathground = function(x) return x >= 0 end
+    overhang = function(x) return x < 0 end
+    local cargo = H.item("rocks",-.7,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    local action = begin(w)
+    assert(loco.dest ~= nil,
+        "A narrow visual shoreline must refine its grid without requiring a static obstacle")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7 and cargo.components.inventoryitem.owner == c)
+end
+
+function scenarios.navigation_shore_overhang_body_clearance()
+    local w,loco,c = overhang_worker()
+    -- The centre line is passable, but a .4-unit-wide overhang cannot fit the
+    -- .5-diameter car. Native-ray recovery must retain body clearance checks.
+    ground = function(x,z) return x >= 0 or (x >= -1.2 and math.abs(z) <= .2) end
+    local cargo = H.item("rocks",-.6,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    w.inst.z = 0
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and loco.dest == nil and w:IsCoolingDown(c),
+        "A passable centre line must not bypass shoreline body clearance")
+    assert(w:GetCargo() == cargo and cargo.components.stackable:StackSize() == 7)
 end
 
 function scenarios.navigation_shore_does_not_cross_water()

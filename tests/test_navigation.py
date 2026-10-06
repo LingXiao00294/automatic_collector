@@ -40,6 +40,13 @@ SCENARIOS = [
     "navigation_shore_pickup",
     "navigation_shore_pickup_already_near",
     "navigation_shore_pickup_tangent",
+    "navigation_shore_overhang_pickup_delivery",
+    "navigation_shore_overhang_approach_from_land",
+    "navigation_shore_overhang_home",
+    "navigation_shore_overhang_water_gap",
+    "navigation_shore_overhang_inland_rejection",
+    "navigation_shore_overhang_refinement",
+    "navigation_shore_overhang_body_clearance",
     "navigation_shore_does_not_cross_water",
     "navigation_grid_arrival_point",
     "navigation_plain_waypoints",
@@ -176,6 +183,25 @@ def test_prefab_and_navigation_with_engine_global_bit(runtime_module):
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_navigation_scenario(navigation, scenario):
     navigation.globals().scenarios[scenario]()
+
+
+def test_native_map_overhang_recovery(navigation):
+    with ZipFile(native_bundle()) as archive:
+        source = archive.read("scripts/components/map.lua").decode("utf-8")
+    methods = []
+    for name in ("IsPassableAtPoint", "IsPassableAtPointWithPlatformRadiusBias"):
+        start = source.index(f"function Map:{name}(")
+        boundary = re.search(r"\n(?:local )?function \w", source[start + 1 :])
+        assert boundary is not None, f"Missing map method boundary for {name}"
+        methods.append(source[start : start + 1 + boundary.start()])
+    navigation.execute("local Map = TheWorld.Map\n" + "\n".join(methods))
+    navigation.execute("""
+        function TheWorld.Map:IsAboveGroundAtPoint(x) return x >= 0 end
+        function TheWorld.Map:IsVisualGroundAtPoint(x) return x >= -1.2 end
+        local passable, overhang = TheWorld.Map:IsPassableAtPoint(-.6, 0, -.3, false, true)
+        assert(passable and overhang, "Native Map must identify passable visual land outside its tiles")
+    """)
+    navigation.globals().scenarios.navigation_shore_overhang_pickup_delivery()
 
 
 def test_blocked_routes_skip_terrain_queries(navigation):
