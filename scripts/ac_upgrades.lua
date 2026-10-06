@@ -10,7 +10,7 @@ function Upgrades.RefreshVisual(inst)
     local advanced = Upgrades.IsAdvanced(inst)
     local name = advanced and "automatic_collector_mk2" or "automatic_collector"
     -- Preserve native character masks, mass and capsule height on every peer.
-    inst.Physics:SetCapsule(advanced and .25 or .35, 1)
+    inst.Physics:SetCapsule(.25, 1)
     inst.AnimState:SetBank(name)
     inst.AnimState:SetBuild(name)
     inst.MiniMapEntity:SetIcon(name .. ".tex")

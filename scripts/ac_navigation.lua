@@ -108,18 +108,15 @@ local function InteractionClear(context, point, goal)
     -- Characters are not obstacles: native pickup has no reach limit and physics
     -- separates bodies, so the player who dropped a stack, a creature or another
     -- car standing on it must not make that drop permanently unreachable.
-    if not TerrainClear(context, point, goal, 0) then return false end
     for _, blocker in ipairs(context.blockers) do
         if not blocker.character and blocker.entity ~= context.target
             and SegmentDistanceSq(point, goal, blocker) < blocker.physics_radius ^ 2 then return false end
     end
-    return true
+    return TerrainClear(context, point, goal, 0)
 end
 
 local function SegmentClear(context, a, b)
-    if not InRange(context, b) or not TerrainClear(context, a, b, context.clearance) then
-        return false
-    end
+    if not InRange(context, b) then return false end
     local dx, dz = b.x - a.x, b.z - a.z
     for _, blocker in ipairs(context.blockers) do
         if SegmentDistanceSq(a, b, blocker) < blocker.radius ^ 2 then
@@ -130,7 +127,7 @@ local function SegmentClear(context, a, b)
                 or DistanceSq(b, blocker) <= DistanceSq(a, blocker) then return false end
         end
     end
-    return true
+    return TerrainClear(context, a, b, context.clearance)
 end
 
 local function Approach(context, point, goal, arrive)
@@ -260,7 +257,7 @@ end
 local function CancelSearch(state)
     if state ~= nil then
         state.search, state.locomotor, state.context, state.dest, state.target = nil, nil, nil, nil, nil
-        state.searching = false
+        state.searching, state.refreshing = false, false
     end
 end
 
@@ -282,12 +279,51 @@ local function CompleteSearch(state, context, steps, goal)
         steps ~= nil and "waypoints=" .. tostring(#steps) or "unreachable")
 end
 
+local function PumpRefreshes()
+    -- Rechecks must not synchronously rescan every cart's range on the same tick.
+    -- One whole snapshot per frame bounds that burst; FIFO also prevents carts
+    -- late in the update order from starving behind continuously moving peers.
+    while scheduler.remaining > 0 and scheduler.refreshes > 0
+        and scheduler.refresh_head <= scheduler.refresh_tail do
+        local state = scheduler.refresh_queue[scheduler.refresh_head]
+        scheduler.refresh_queue[scheduler.refresh_head] = nil
+        scheduler.refresh_head = scheduler.refresh_head + 1
+        local locomotor = state.locomotor
+        if locomotor ~= nil and locomotor._ac_navigation == state and locomotor.dest == state.dest
+            and locomotor.inst:IsValid() and locomotor.inst.components.ac_worker:IsWorking()
+            and locomotor.dest:IsValid() then
+            local platform = state.context.platform
+            state.refreshing = false
+            if locomotor.inst:GetCurrentPlatform() ~= platform
+                or (platform ~= nil and not platform:IsValid()) then
+                state.failed, state.failure_reason = true, "platform_changed"
+            else
+                scheduler.remaining, scheduler.refreshes = scheduler.remaining - 1, scheduler.refreshes - 1
+                state.context = Context(locomotor.inst, state.radius, state.target)
+                -- Time spent deliberately paused in this queue is not a physics stall.
+                state.progress_time = state.progress_time + GetTime() - state.refresh_started
+                state.validate = true
+            end
+        else
+            CancelSearch(state)
+        end
+    end
+    if scheduler.refresh_head > scheduler.refresh_tail then
+        scheduler.refresh_queue, scheduler.refresh_head, scheduler.refresh_tail = {}, 1, 0
+    end
+end
+
 local function PumpSearches()
     local tick = math.floor(GetTime() / FRAMES + .5)
     if scheduler == nil or scheduler.world ~= TheWorld then
-        scheduler = { world = TheWorld, queue = {}, head = 1, tail = 0 }
+        scheduler = { world = TheWorld, queue = {}, head = 1, tail = 0,
+            refresh_queue = {}, refresh_head = 1, refresh_tail = 0 }
     end
-    if scheduler.tick ~= tick then scheduler.tick, scheduler.remaining = tick, FRAME_BUDGET end
+    if scheduler.tick ~= tick then
+        scheduler.tick, scheduler.remaining, scheduler.refreshes = tick, FRAME_BUDGET, 1
+    end
+    -- Reserve a turn for waiting rechecks before searches spend the frame budget.
+    PumpRefreshes()
     while scheduler.remaining > 0 and scheduler.head <= scheduler.tail do
         local state = scheduler.queue[scheduler.head]
         scheduler.queue[scheduler.head] = nil
@@ -365,7 +401,7 @@ local function FindPath(locomotor)
         local steps = Plan(context, LocalPoint(platform, inst:GetPosition()), goal, locomotor.arrive_dist)
         SpendBudget()
         -- Obstacles may change while queued; validate against a fresh snapshot
-        -- before resuming movement, not a quarter second after starting to walk.
+        -- before resuming movement, not after the next periodic recheck.
         return Context(inst, radius, target), steps, goal
     end)
     PumpSearches()
@@ -492,7 +528,7 @@ function M.Attach(inst)
         local state = self._ac_navigation
         if state ~= nil and self.dest ~= nil then
             if not self.dest:IsValid() then inst.components.ac_worker:Cancel(true, "target_changed") return end
-            if state.searching then PauseMovement(self) return end
+            if state.searching or state.refreshing then PauseMovement(self) return end
             if state.context == nil then self:Clear() return end
             if state.failed then Reject(self, state.failure_reason) return end
             state.dt = math.max(dt or 0, FRAMES)
@@ -510,8 +546,16 @@ function M.Attach(inst)
                 end
             end
             local time = GetTime()
-            if state.validate or (not arrive_check_only and time >= state.nextcheck) then
-                if not state.validate then state.context = Context(inst, state.radius, state.target) end
+            if not state.validate and not arrive_check_only and time >= state.nextcheck then
+                state.refreshing = true
+                state.refresh_started = time
+                scheduler.refresh_tail = scheduler.refresh_tail + 1
+                scheduler.refresh_queue[scheduler.refresh_tail] = state
+                PumpSearches()
+                if state.refreshing then PauseMovement(self) return end
+                if state.failed then Reject(self, state.failure_reason) return end
+            end
+            if state.validate then
                 state.validate = nil
                 state.nextcheck = time + RECHECK
                 local point = LocalPoint(platform, inst:GetPosition())

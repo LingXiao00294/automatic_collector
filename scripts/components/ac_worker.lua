@@ -1,6 +1,6 @@
 local Targets = require("ac_targets")
 local Upgrades = require("ac_upgrades")
-local SCAN_INTERVAL = .25
+local SCAN_INTERVAL = .5
 -- A failed plan says nothing about the target itself, so it starts on a short
 -- backoff and only reaches retry_delay after repeated failures.
 local PATH_RETRY_DELAY = .5

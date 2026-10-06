@@ -51,7 +51,11 @@ SCENARIOS = [
     "navigation_waiting_delivery_loses_capacity",
     "navigation_home_retry_backoff",
     "navigation_queued_search_capacity_changes",
-    "navigation_enclosed_cargo_conservation",
+    "navigation_cancel_queued_refresh",
+    "navigation_refresh_wait_not_stuck",
+    "navigation_refresh_obstacles_change",
+    "navigation_refresh_with_busy_search",
+    "navigation_queued_refresh_platform_removed",
 ]
 
 
@@ -169,6 +173,21 @@ def test_prefab_and_navigation_with_engine_global_bit(runtime_module):
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_navigation_scenario(navigation, scenario):
     navigation.globals().scenarios[scenario]()
+
+
+def test_blocked_routes_skip_terrain_queries(navigation):
+    result = navigation.globals().scenarios.navigation_enclosed_cargo_conservation()
+    assert result.maximum_ground <= 5000, (
+        "Blocked segments must be rejected before terrain sampling"
+    )
+    assert result.stored == 40
+
+
+def test_moving_carts_share_recheck_budget(navigation):
+    result = navigation.globals().scenarios.navigation_refresh_budget()
+    assert result.maximum_scans == 1
+    assert result.maximum_entities <= 650
+    assert result.frames == result.cars == 8
 
 
 @pytest.mark.parametrize(

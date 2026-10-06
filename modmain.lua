@@ -4,6 +4,7 @@ local G = GLOBAL
 local Upgrades = require("ac_upgrades")
 G.TUNING.AUTOMATIC_COLLECTOR = {
     radius = GetModConfigData("work_radius") or 12,
+    new_navigation = GetModConfigData("new_navigation") ~= false,
     matching_only = GetModConfigData("matching_only") == true,
     pick_plants = GetModConfigData("pick_plants") ~= false,
     hammer_giants = GetModConfigData("hammer_giants") ~= false,

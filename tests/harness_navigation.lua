@@ -54,7 +54,7 @@ local function blocker(x, z, radius, group, mask)
 end
 
 local function prepare(w, radius)
-    local inst = physics(w.inst, radius or .35, CHARACTERS, bit.bor(CHARACTERS,OBSTACLES))
+    local inst = physics(w.inst, radius or .25, CHARACTERS, bit.bor(CHARACTERS,OBSTACLES))
     local rotation = 0
     function inst.Transform:GetRotation() return rotation end
     function inst.Transform:SetRotation(value) rotation = value end
@@ -470,6 +470,13 @@ function scenarios.navigation_delivery_waits_for_route()
 end
 
 function scenarios.navigation_enclosed_cargo_conservation()
+    local passable = TheWorld.Map.IsPassableAtPoint
+    local calls, maximum, tick_id = 0, 0, GetTick()
+    TheWorld.Map.IsPassableAtPoint = function(self, ...)
+        if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
+        calls = calls + 1 maximum = math.max(maximum,calls)
+        return passable(self, ...)
+    end
     local cars, walls = {}, {}
     local c = physics(H.chest(5),.5,OBSTACLES,CHARACTERS)
     for step = -4, 4 do
@@ -512,6 +519,126 @@ function scenarios.navigation_enclosed_cargo_conservation()
     end
     assert(c.components.container.stored.rocks == 40,
         "Opening the enclosure must resume delivery without losing or duplicating cargo")
+    TheWorld.Map.IsPassableAtPoint = passable
+    return { maximum_ground=maximum, stored=c.components.container.stored.rocks }
+end
+
+local function refreshing_cars(count)
+    local cars = {}
+    H.chest(8)
+    for _ = 1, count do
+        local w = H.worker() local loco = prepare(w)
+        w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+        local action = begin(w)
+        table.insert(cars,{worker=w,loco=loco,action=action,context=loco._ac_navigation.context})
+    end
+    return cars
+end
+
+function scenarios.navigation_refresh_budget()
+    for i = 1, 120 do blocker(i%10-5,4+math.floor(i/10)*.25,.1) end
+    for _ = 1, 500 do H.entity("decoration",2) end
+    local cars = refreshing_cars(8)
+    local find = TheSim.FindEntities
+    local scans, entities, max_scans, max_entities, tick_id = 0, 0, 0, 0, GetTick()
+    TheSim.FindEntities = function(self, ...)
+        local result = find(self, ...)
+        if GetTick() ~= tick_id then tick_id, scans, entities = GetTick(), 0, 0 end
+        scans, entities = scans+1, entities+#result
+        max_scans, max_entities = math.max(max_scans,scans), math.max(max_entities,entities)
+        return result
+    end
+    time = (GetTick()+8)*FRAMES -- First simulation tick after the .25-second recheck interval.
+    local refreshed, frames = 0, 0
+    for frame = 1, 16 do
+        for _, car in ipairs(cars) do
+            if not car.done then
+                car.loco:OnUpdate(FRAMES)
+                assert(car.worker.pending.action == car.action)
+                if car.loco._ac_navigation.context ~= car.context then
+                    car.done, refreshed = true, refreshed+1
+                else
+                    assert(car.loco._ac_navigation.refreshing and car.worker.inst.Physics.speed == 0,
+                        "Rechecks waiting for their turn must stop instead of using an expired snapshot")
+                    car.loco:SetMotorSpeed(6)
+                    assert(car.worker.inst.Physics.speed == 0, "Animations cannot restart a waiting cart")
+                end
+            end
+        end
+        frames = frame
+        if refreshed == #cars then break end
+        time = time+FRAMES
+    end
+    TheSim.FindEntities = find
+    assert(refreshed == #cars, "Every cart must receive a recheck without starvation")
+    return {maximum_scans=max_scans,maximum_entities=max_entities,frames=frames,cars=refreshed}
+end
+
+function scenarios.navigation_cancel_queued_refresh()
+    local cars = refreshing_cars(2)
+    time = time+.25
+    for _, car in ipairs(cars) do car.loco:OnUpdate(FRAMES) end
+    local waiting = cars[2]
+    assert(waiting.loco._ac_navigation.refreshing)
+    local failures = 0 waiting.action:AddFailAction(function() failures = failures+1 end)
+    local cargo = waiting.worker:GetCargo()
+    waiting.worker:Cancel(true)
+    for _ = 1, 10 do time = time+FRAMES cars[1].loco:OnUpdate(FRAMES) end
+    assert(waiting.loco._ac_navigation == nil and waiting.loco.dest == nil and waiting.loco.path == nil)
+    assert(failures == 1 and waiting.worker:GetCargo() == cargo)
+end
+
+function scenarios.navigation_refresh_wait_not_stuck()
+    local cars = refreshing_cars(2)
+    time = time+.25
+    for _, car in ipairs(cars) do car.loco:OnUpdate(FRAMES) end
+    local waiting = cars[2]
+    assert(waiting.loco._ac_navigation.refreshing)
+    local path = waiting.loco.path
+    time = time+2
+    waiting.loco:OnUpdate(FRAMES)
+    assert(waiting.loco.path == path and waiting.loco._ac_navigation.retries == 0,
+        "Deliberate recheck waiting must not be counted as a physical stall")
+    assert(not waiting.loco._ac_navigation.refreshing and not waiting.loco._ac_navigation_paused)
+end
+
+function scenarios.navigation_refresh_obstacles_change()
+    local cars = refreshing_cars(2)
+    time = time+.25
+    for _, car in ipairs(cars) do car.loco:OnUpdate(FRAMES) end
+    local waiting = cars[2]
+    assert(waiting.loco._ac_navigation.refreshing)
+    local path = waiting.loco.path
+    blocker(4,0,1)
+    cars[1].worker.inst.z = 3
+    time = (GetTick()+1)*FRAMES
+    waiting.loco:OnUpdate(FRAMES)
+    assert(waiting.loco._ac_navigation.searching or waiting.loco.path ~= path,
+        "A refreshed snapshot must replan before moving toward a newly placed obstacle")
+    deliver(waiting.worker,waiting.action)
+end
+
+function scenarios.navigation_refresh_with_busy_search()
+    local cars = refreshing_cars(2)
+    H.chest(108)
+    local busy = H.worker(100) local busy_loco = prepare(busy)
+    busy.inst.components.inventory:GiveItem(H.item("rocks",100,nil,7))
+    ground = function(x) return x < 103.5 or x > 104.5 end
+    begin(busy,nil,false)
+    time = (GetTick()+8)*FRAMES
+    busy_loco:OnUpdate(FRAMES)
+    assert(busy_loco._ac_navigation.searching)
+    for _, car in ipairs(cars) do
+        car.loco:OnUpdate(FRAMES)
+        assert(car.loco._ac_navigation.refreshing)
+    end
+    for i = 1, #cars do
+        time = time+FRAMES
+        busy_loco:OnUpdate(FRAMES)
+        cars[i].loco:OnUpdate(FRAMES)
+        assert(cars[i].loco._ac_navigation.context ~= cars[i].context,
+            "Searches must reserve a budget turn for queued rechecks")
+    end
 end
 
 function scenarios.navigation_waiting_delivery_loses_capacity()
@@ -522,7 +649,7 @@ function scenarios.navigation_waiting_delivery_loses_capacity()
     if w.inst.components.locomotor.dest ~= nil then tick(w,true) end
     time = time + .01 w.nextscan = 0
     assert(w:GetNextAction(false) == nil and w:GetCargo() == cargo)
-    c.components.container.capacity = 0 time = time + .3
+    c.components.container.capacity = 0 time = time + .5
     assert(w:GetNextAction(false) == nil and w:GetCargo() == nil)
     assert(#w.inst.components.inventory.drops == 1 and cargo:IsValid()
         and cargo.components.stackable:StackSize() == 7 and cargo.components.inventoryitem.owner == nil)
@@ -717,6 +844,23 @@ function scenarios.navigation_queued_platform_removed()
     boat.entity.LocalToWorldSpace = function() error("Do not transform through a removed platform") end
     boat.entity.WorldToLocalSpace = boat.entity.LocalToWorldSpace
     tick(w,true)
+    assert(w.pending == nil and loco.dest == nil and w:GetCargo() == cargo)
+end
+
+function scenarios.navigation_queued_refresh_platform_removed()
+    local cars = refreshing_cars(1)
+    local w,loco,boat,_,_,cargo = boat_worker()
+    ground = function() return true end
+    begin(w)
+    time = math.max(cars[1].loco._ac_navigation.nextcheck,loco._ac_navigation.nextcheck)+FRAMES
+    cars[1].loco:OnUpdate(FRAMES)
+    loco:OnUpdate(FRAMES)
+    assert(loco._ac_navigation.refreshing)
+    boat:Remove()
+    boat.entity.LocalToWorldSpace = function() error("Queued rechecks must not transform a removed platform") end
+    boat.entity.WorldToLocalSpace = boat.entity.LocalToWorldSpace
+    time = time+FRAMES
+    loco:OnUpdate(FRAMES)
     assert(w.pending == nil and loco.dest == nil and w:GetCargo() == cargo)
 end
 
@@ -1058,12 +1202,12 @@ function scenarios.navigation_native_idle_lifecycle()
     assert(SGManager.hibernaters[w.inst.sg], "Idle stategraph must be truly hibernating")
     local target = H.item("rocks",4,nil,7)
     local dropped = time
-    for _ = 1, 12 do
+    for _ = 1, 20 do
         scene_tick(scene)
         if w.inst.sg:HasStateTag("moving") then break end
     end
-    assert(w.inst.sg:HasStateTag("moving") and time-dropped <= .4,
-        string.format("Idle car must start moving within .4s: actions=%d state=%s pending=%s dest=%s updating=%s events=%d cooldown=%s",
+    assert(w.inst.sg:HasStateTag("moving") and time-dropped <= .65,
+        string.format("Idle car must start moving within .65s: actions=%d state=%s pending=%s dest=%s updating=%s events=%d cooldown=%s",
             #scene.actions,w.inst.sg.currentstate.name,tostring(w.pending~=nil),tostring(scene.loco.dest~=nil),
             tostring(scene.loco.isupdating),#w.inst.events,tostring(w:IsCoolingDown(target))))
     for _ = 1, 600 do scene_tick(scene) end
@@ -1071,9 +1215,9 @@ function scenarios.navigation_native_idle_lifecycle()
     assert(w.inst.sg.currentstate.name == "idle")
     local again = H.item("rocks",4,nil,7)
     dropped = time
-    for _ = 1, 12 do scene_tick(scene) end
+    for _ = 1, 20 do scene_tick(scene) end
     assert(w.pending ~= nil and w.pending.action.target == again and not w:IsCoolingDown(again))
-    assert(scene.actions[#scene.actions].time-dropped <= .4 and target.components.inventoryitem.owner == c)
+    assert(scene.actions[#scene.actions].time-dropped <= .65 and target.components.inventoryitem.owner == c)
 end
 
 function scenarios.navigation_native_return_dispatch()
@@ -1085,10 +1229,10 @@ function scenarios.navigation_native_return_dispatch()
     assert(#scene.actions == 1 and scene.actions[1].action.action == ACTIONS.WALKTO)
     local target = H.item("rocks",12,nil,7)
     local dropped = time
-    for _ = 1, 12 do scene_tick(scene) end
+    for _ = 1, 20 do scene_tick(scene) end
     assert(w.pending ~= nil and w.pending.action.target == target,
-        "New work must interrupt a home-only WALKTO within .4s")
-    assert(scene.actions[2].time-dropped <= .4 and not w:IsCoolingDown(target))
+        "New work must interrupt a home-only WALKTO within .65s")
+    assert(scene.actions[2].time-dropped <= .65 and not w:IsCoolingDown(target))
 end
 
 function scenarios.navigation_native_idle_wakeup()
@@ -1105,10 +1249,10 @@ function scenarios.navigation_native_idle_wakeup()
         end
         local target = H.item("rocks",base+4,nil,7)
         local dropped = time
-        for _ = 1, 12 do scene_tick(scene) end
+        for _ = 1, 20 do scene_tick(scene) end
         assert(w.pending ~= nil and w.pending.action.target == target,
-            "Idle patrol must wake a delayed/hibernating BrainManager entry within .4s")
-        assert(scene.actions[1].time-dropped <= .4 and not w:IsCoolingDown(target))
+            "Idle patrol must wake a delayed/hibernating BrainManager entry within .65s")
+        assert(scene.actions[1].time-dropped <= .65 and not w:IsCoolingDown(target))
         scene.brain:_Stop_Internal() SGManager:RemoveInstance(w.inst.sg)
         w:OnRemoveFromEntity()
     end
@@ -1122,14 +1266,14 @@ function scenarios.navigation_native_blocked_return_dispatch()
     ground = function(x,z) return x < 2.5 or x > 3.5 or math.abs(z) > 30 end
     for _ = 1, 5 do scene_tick(scene) end
     assert(#scene.actions == 1 and w.pending == nil and scene.loco.dest == nil)
-    local dropped = time
     for _ = 1, 6 do scene_tick(scene) end
     assert(#scene.actions == 1, "Unreachable home must retain the return retry throttle")
     local target = H.item("rocks",8,nil,7)
-    for _ = 1, 6 do scene_tick(scene) end
+    local dropped = time
+    for _ = 1, 20 do scene_tick(scene) end
     assert(w.pending ~= nil and w.pending.action.target == target,
         "Failed return must not delay work on the car's reachable side")
-    assert(scene.actions[2].time-dropped <= .4 and not w:IsCoolingDown(target))
+    assert(scene.actions[2].time-dropped <= .65 and not w:IsCoolingDown(target))
 end
 
 function scenarios.navigation_trace_explains_cooldown()
@@ -1169,13 +1313,13 @@ function scenarios.navigation_manager_long_idle()
         assert(#actions == 0 and w.pending == nil)
         local dropped = time
         local target = H.item("rocks",base+4,nil,7)
-        for _ = 1, 12 do
+        for _ = 1, 20 do
             manager_tick()
             if #actions > 0 then break end
         end
         assert(#actions == 1 and actions[1].action.target == target,
-            "Long-idle brain must dispatch within .4s through BrainManager")
-        assert(actions[1].time - dropped <= .4 and not w:IsCoolingDown(target))
+            "Long-idle brain must dispatch within .65s through BrainManager")
+        assert(actions[1].time - dropped <= .65 and not w:IsCoolingDown(target))
         brain:_Stop_Internal()
     end
 end
@@ -1195,11 +1339,11 @@ function scenarios.navigation_manager_multiple_idle()
         car.target = H.item("rocks",i*40+4,nil,7)
     end
     local dropped = time
-    for _ = 1, 12 do manager_tick() end
+    for _ = 1, 20 do manager_tick() end
     for _, car in ipairs(cars) do
         assert(#car.actions == 1 and car.actions[1].action.target == car.target,
             "Each idle car must dispatch through its own BrainManager waiter")
-        assert(car.actions[1].time - dropped <= .4 and not car.worker:IsCoolingDown(car.target))
+        assert(car.actions[1].time - dropped <= .65 and not car.worker:IsCoolingDown(car.target))
         car.brain:_Stop_Internal()
     end
 end
@@ -1234,7 +1378,7 @@ function scenarios.navigation_idle_dispatch()
     assert(#actions == 0)
     time = time+FRAMES
     local target = H.item("rocks",4,nil,7)
-    assert(dispatch_by(brain,actions,1,time+.3).target == target)
+    assert(dispatch_by(brain,actions,1,time+.65).target == target)
 end
 
 function scenarios.navigation_resume_dispatch()

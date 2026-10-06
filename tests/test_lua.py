@@ -164,6 +164,7 @@ def test_lua_51_syntax():
         "harvest_toggle_contact_revalidation",
         "harvest_toggle_respects_config",
         "harvest_toggle_upgrade_and_load_order",
+        "navigation_configuration",
         "upgrade_single_and_stack",
         "upgrade_two_players_and_reentry",
         "upgrade_invalid_or_interrupted",
