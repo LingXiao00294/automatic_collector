@@ -1,5 +1,12 @@
 local Targets = require("ac_targets")
 local Upgrades = require("ac_upgrades")
+local SCAN_INTERVAL = .25
+-- A failed plan says nothing about the target itself, so it starts on a short
+-- backoff and only reaches retry_delay after repeated failures.
+local PATH_RETRY_DELAY = .5
+-- Only a plan that found no route at all. A stuck or displaced car already
+-- re-planned internally, or left the target's platform behind.
+local PATH_FAILURES = { unreachable = true }
 
 local Worker = Class(function(self, inst)
     self.inst = inst
@@ -12,8 +19,10 @@ local Worker = Class(function(self, inst)
     self.homelocal = nil
     self.pending = nil
     self.cooldowns = setmetatable({}, { __mode = "k" })
+    self.pathfails = setmetatable({}, { __mode = "k" })
     self.action_speed = 1
     self.nextscan = 0
+    self.nextreturn = 0
     self.blocked = false
     self.farm_count = 0
     self.farm_draining = false
@@ -21,13 +30,33 @@ local Worker = Class(function(self, inst)
 end)
 
 function Worker:RefreshWatchdog()
-    local period = self.pending ~= nil and .1 or .5
+    local period = self.pending ~= nil and .1 or SCAN_INTERVAL
     if self.task ~= nil and self.taskperiod == period then return end
     if self.task ~= nil then self.task:Cancel() end
     self.taskperiod = period
-    -- Only an active job needs fast validation; idle planning keeps its .5s throttle.
+    -- Active jobs validate faster; idle patrol bounds native brain wakeup.
     local initialdelay = self.pending ~= nil and period or nil
     self.task = self.inst:DoPeriodicTask(period, function() self:Watchdog() end, initialdelay)
+end
+
+function Worker:WakeBrain()
+    local brain = self.inst.brain
+    if brain ~= nil and not brain.stopped and not brain.paused and self:IsWorking() then
+        brain:ForceUpdate()
+    end
+end
+
+function Worker:SetDebugEnabled(value)
+    self.debug_enabled = value == true
+    self.next_debug_scan = 0
+    self:Trace("debug_enabled")
+end
+
+function Worker:Trace(event, target, detail)
+    if not self.debug_enabled then return end
+    print(string.format("[automatic_collector] car=%s event=%s target=%s detail=%s %s",
+        tostring(self.inst.GUID), event, target ~= nil and tostring(target.prefab) or "none",
+        tostring(detail or ""), self:GetDebugString()))
 end
 
 function Worker:GetHome()
@@ -204,8 +233,23 @@ function Worker:Finish(action, success)
     local target = self.pending.claimtarget or action.target
     Targets.Release(self, target)
     if not success and not self.pending.replan and target ~= nil and target:IsValid() then
-        self.cooldowns[target] = GetTime() + self.config.retry_delay
+        local delay = self.config.retry_delay
+        if PATH_FAILURES[self.pending.failure_reason] then
+            -- Retry a target the planner could not reach soon after the first
+            -- failure, and only back off to retry_delay once it keeps failing.
+            local fails = (self.pathfails[target] or 0) + 1
+            self.pathfails[target] = fails
+            delay = math.min(delay, PATH_RETRY_DELAY * 2 ^ (fails - 1))
+        end
+        self.cooldowns[target] = GetTime() + delay
+    elseif success and target ~= nil then
+        self.pathfails[target] = nil
     end
+    if not success then
+        self.last_failure = self.pending.failure_reason or (self.pending.replan and "target_changed" or "action_failed")
+        self.last_failure_time = GetTime()
+    end
+    self:Trace(success and "job_success" or "job_failed", target, success and "" or self.last_failure)
     if self.pending.farm then
         -- Native/mod callbacks may give products directly to the collector.
         -- Return every real item to the ground before planning the next crop.
@@ -222,7 +266,9 @@ function Worker:Finish(action, success)
         if extra ~= nil then inventory:DropItem(extra, true) end
     end
     self.pending = nil
+    if success then self.nextscan = 0 end
     self:RefreshWatchdog()
+    self:WakeBrain()
     local sg = self.inst.sg
     -- Native STORE opens the target. Successful animated delivery keeps it open
     -- until the store state's onexit; failures and non-animated jobs close now.
@@ -234,21 +280,22 @@ function Worker:Finish(action, success)
     self.inst:PushEvent(success and "ac_jobsuccess" or "ac_jobfailed", { target = target, action = action })
 end
 
-function Worker:FailAction(action, replan)
+function Worker:FailAction(action, replan, reason)
     if action == nil then return end
     if self.pending ~= nil and self.pending.action == action and replan then
         self.pending.replan = true
         self.nextscan = 0
     end
+    if self.pending ~= nil and self.pending.action == action then self.pending.failure_reason = reason end
     -- Notify native DoAction listeners as well as releasing the worker's job.
     action:Fail()
     self:Finish(action, false)
 end
 
-function Worker:Cancel(replan)
+function Worker:Cancel(replan, reason)
     if self.pending ~= nil then
         local action = self.pending.action
-        self:FailAction(action, replan)
+        self:FailAction(action, replan, reason)
     end
     self.inst.components.locomotor:Stop()
     self.inst.components.locomotor:Clear()
@@ -263,6 +310,10 @@ function Worker:SetEnabled(value)
     self.inst._ac_enabled:set(self.enabled)
     if not self.enabled then
         self:Cancel()
+    else
+        self.nextscan = 0
+        self.nextreturn = 0
+        self:WakeBrain()
     end
     self.inst:PushEvent("ac_enabledchanged", { enabled = self.enabled })
 end
@@ -280,6 +331,7 @@ function Worker:SetHarvestEnabled(value)
         self:Cancel(true)
     end
     self.nextscan = 0
+    self:WakeBrain()
     self.inst:PushEvent("ac_harvestenabledchanged", { enabled = self.harvest_enabled })
 end
 
@@ -314,26 +366,43 @@ end
 function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
         or GetTime() - self.pending.started > self.config.action_timeout) then
-        self:Cancel()
+        self:Cancel(false, self:IsWorking() and "timeout" or "inactive")
     elseif self.pending ~= nil and not self:ValidateAction(self.pending.action) then
         -- Targets can be picked, harvested or removed while we are still walking.
         -- Notify DoAction, release the claim and clear movement for every job kind.
         -- Changed world conditions are not a path failure and need no cooldown.
         self:Cancel(true)
+    elseif self.pending == nil then
+        -- World drops do not send events to nearby brains. Bound idle wakeup
+        -- through the native scheduler even when its brain entry is sleeping.
+        self:WakeBrain()
     end
 end
 
-function Worker:GetNextAction()
+function Worker:GetHomeAction()
+    if not self:IsWorking() or self.pending ~= nil or GetTime() < self.nextreturn then return nil end
+    local home = self:GetHome()
+    if self.inst:GetDistanceSqToPoint(home) > 1 then
+        return BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, home, nil, .5)
+    end
+end
+
+function Worker:GetNextAction(allow_return)
     if not self:IsWorking() or self.pending ~= nil or GetTime() < self.nextscan then
         return nil
     end
-    self.nextscan = GetTime() + .5
+    self.nextscan = GetTime() + SCAN_INTERVAL
+    self.lastscan = GetTime()
     if self.home == nil then
         self:SetHome()
     end
     local target, kind, action, cargo
     cargo = self:GetCargo()
     local entities = Targets.GetWorkEntities(self)
+    if self.debug_enabled and GetTime() >= self.next_debug_scan then
+        self.next_debug_scan = GetTime() + 1
+        self:Trace("scan", nil, "entities=" .. tostring(#entities))
+    end
     local harvesting = self:IsHarvestEnabled()
     if harvesting and cargo == nil and not self.farm_draining then
         target, kind, action = Targets.FindWork(self, "farm", entities)
@@ -369,11 +438,7 @@ function Worker:GetNextAction()
             self.inst.components.inventory:DropItem(cargo, true, true)
         end
         self:SetBlocked(cargo ~= nil and self:GetCargo() == cargo)
-        local home = self:GetHome()
-        if self.inst:GetDistanceSqToPoint(home) > 1 then
-            return BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, home, nil, .5)
-        end
-        return nil
+        return allow_return ~= false and self:GetHomeAction() or nil
     end
     self:SetBlocked(false)
     if kind ~= "store" and not Targets.Claim(self, target) then
@@ -390,6 +455,7 @@ function Worker:GetNextAction()
     buffered:AddSuccessAction(function() self:Finish(buffered, true) end)
     buffered:AddFailAction(function() self:Finish(buffered, false) end)
     self:RefreshWatchdog()
+    self:Trace("job_selected", target, kind)
     return buffered
 end
 
@@ -420,7 +486,9 @@ function Worker:OnDropped()
     self:SetHome()
     self.farm_count, self.farm_draining = 0, false
     self.cooldowns = setmetatable({}, { __mode = "k" })
-    self.nextscan = GetTime() + .5
+    self.pathfails = setmetatable({}, { __mode = "k" })
+    self.nextscan = 0
+    self.nextreturn = 0
     self:SetEnabled(true)
 end
 
@@ -482,10 +550,32 @@ function Worker:OnRemoveFromEntity()
 end
 
 function Worker:GetDebugString()
-    return string.format("enabled=%s harvest=%s cargo=%s job=%s farm=%d/5 draining=%s", tostring(self.enabled),
+    local time = GetTime()
+    local cooling, retry_in = 0, nil
+    for target, untiltime in pairs(self.cooldowns) do
+        if target:IsValid() and untiltime > time then
+            cooling = cooling + 1
+            retry_in = math.min(retry_in or math.huge, untiltime - time)
+        end
+    end
+    local brain, queue = self.inst.brain, "none"
+    if brain ~= nil then
+        queue = brain.stopped and "stopped" or (brain.paused and "paused" or "active")
+        if BrainManager ~= nil and BrainManager.NameList ~= nil and not brain.stopped and not brain.paused then
+            queue = BrainManager:NameList(BrainManager.instances[brain])
+        end
+    end
+    local sg = self.inst.sg
+    local state = sg ~= nil and sg.currentstate ~= nil and sg.currentstate.name or "none"
+    local loco = self.inst.components.locomotor
+    local returning = loco ~= nil and loco.bufferedaction ~= nil and loco.bufferedaction.action == ACTIONS.WALKTO
+    return string.format("enabled=%s harvest=%s cargo=%s job=%s farm=%d/5 draining=%s state=%s brain=%s scan_age=%.2f scan_in=%.2f returning=%s cooldowns=%d retry_in=%.2f last_failure=%s failure_age=%.2f", tostring(self.enabled),
         tostring(self:IsHarvestEnabled()),
         tostring(self:GetCargo() ~= nil), self.pending ~= nil and self.pending.kind or "idle",
-        self.farm_count, tostring(self.farm_draining))
+        self.farm_count, tostring(self.farm_draining), state, queue,
+        self.lastscan ~= nil and time - self.lastscan or -1, math.max(0, self.nextscan - time),
+        tostring(returning), cooling, retry_in or 0, self.last_failure or "none",
+        self.last_failure_time ~= nil and time - self.last_failure_time or -1)
 end
 
 return Worker

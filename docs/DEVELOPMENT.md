@@ -43,6 +43,22 @@ uv run --locked ty check tools tests
 
 测试临时目录设在仓库缓存内，避免本机系统临时目录的访问限制。pytest 使用 Lupa 执行 LuaJIT，检查语法、作业行为、资源二进制和发行范围；没有固定覆盖率门槛。修改行为时补充相应边界场景，测试命名使用 `test_*.py` 与 `test_*`。
 
+`tests/test_navigation.py` 在地形/碰撞夹具和本机原版 locomotor 方法两种模式下执行范围内避障场景，覆盖连续障碍转弯、行走动画循环重新设速、岸边拾取、隔水拒绝和普通坐标表路径点。调度场景另加载本机原版 Brain、BrainManager、行为树、`DoAction` 与 `StandStill`，覆盖放置、长时间待机、多车和快速动作后的下一任务；生命周期场景继续加载 SGManager、实际小车 StateGraph、原版动作提交与实体 BufferedAction 方法，检查完整拾取运输、返程抢占及返程失败后重选。人为设置 BrainManager 睡眠 10 秒或 Hibernate 的场景属于故障注入，只验证主动唤醒能力。原版方法从安装目录的 `data/databundles/scripts.zip` 只读加载；可通过 `DST_GAME_ROOT` 指定安装目录，未安装时跳过需要原版源码的检查，独立寻路夹具仍可运行。测试模拟时间与物理位移，不启动游戏，不分发游戏源码；客户端物理与服务器负载仍须实测。
+
+## 待机延迟诊断
+
+重新进入世界加载当前发行文件后，在远程/服务端控制台执行：
+
+```lua
+for _, inst in pairs(Ents) do
+    if inst.components.ac_worker ~= nil then
+        inst.components.ac_worker:SetDebugEnabled(true)
+    end
+end
+```
+
+让小车先待机，再丢下可运输物品并走开。服务端日志中的 `[automatic_collector]` 行记录车的 GUID、扫描、任务选择、路径结果和成功/失败；结合日志时间、`scan_age`、`scan_in`、`brain`、`state`、`cooldowns`、`retry_in` 和 `last_failure` 区分未扫描、行为树等待及目标失败冷却。扫描日志最多每车每秒一条，诊断默认关闭且不存档；将上述 `true` 改为 `false` 即可停止输出。实机约 10 秒的待机启动延迟尚未确认根因，离线正常待机与故障注入测试不能证明实机问题已解决。
+
 ## 美术构建
 
 只修改游戏逻辑或文档时无需重建美术。修改贴图、绑定或动画曲线后执行：

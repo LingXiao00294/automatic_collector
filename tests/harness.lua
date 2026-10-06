@@ -328,25 +328,25 @@ end
 function scenarios.watchdog_idle_and_lifecycle()
     local w = setup()
     local idle = w.task
-    assert(idle.period == .5 and w:GetNextAction() == nil)
+    assert(idle.period == .25 and w:GetNextAction() == nil)
     local before = scans
-    for tick = 1, 4 do
+    for tick = 1, 2 do
         advance_periodic(w.inst,tick * .1)
         assert(w:GetNextAction() == nil and w.task == idle)
     end
     assert(scans == before)
     item("twigs",1)
-    advance_periodic(w.inst,.5)
+    advance_periodic(w.inst,.25)
     local action = w:GetNextAction()
     assert(action ~= nil and idle.cancelled and w.task.period == .1)
     local active = w.task
     w.inst.buffered = action w:PerformAction(action)
-    assert(active.cancelled and w.task.period == .5)
+    assert(active.cancelled and w.task.period == .25)
     now = 1
     action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
     active = w.task
     w:SetEnabled(false)
-    assert(active.cancelled and w.task.period == .5 and w:GetCargo() ~= nil)
+    assert(active.cancelled and w.task.period == .25 and w:GetCargo() ~= nil)
     local stopped = w.task w:OnRemoveFromEntity()
     assert(stopped.cancelled)
 end
@@ -367,7 +367,7 @@ function scenarios.active_watchdog_keeps_valid_target()
     assert(validations == 3 and scans - before == 3 and w.pending.action == action)
     assert(action.target == target and w.inst.mutations == nil)
     local active = w.task action:Fail()
-    assert(active.cancelled and w.task.period == .5)
+    assert(active.cancelled and w.task.period == .25)
     assert(validations == 4, "The native failure callback classifies the still-valid target once")
     advance_periodic(w.inst,.7)
     assert(validations == 4)
@@ -384,7 +384,7 @@ function scenarios.active_watchdog_rechecks_work_and_capacity()
     local action = w:GetNextAction() assert(action.action == ACTIONS.STORE)
     action.target.components.container.capacity = 0
     advance_periodic(w.inst,.2)
-    assert(w.pending == nil and w:GetCargo() == cargo and w.task.period == .5)
+    assert(w.pending == nil and w:GetCargo() == cargo and w.task.period == .25)
     assert(w:GetNextAction().target ~= action.target)
 end
 
@@ -685,7 +685,7 @@ function scenarios.native_failure_before_watchdog()
     player.components.inventory:GiveItem(first)
     now = FRAMES loco:OnUpdate()
     assert(failures == 1 and w.pending == nil and loco.dest == nil and loco.bufferedaction == nil)
-    assert(not w:IsCoolingDown(first) and w.nextscan == 0 and w.task.period == .5)
+    assert(not w:IsCoolingDown(first) and w.nextscan == 0 and w.task.period == .25)
     assert(Targets.IsAvailable(worker(),first) and w.farm_count == 0)
     player.components.inventory:RemoveItem(first)
     local replacement = w:GetNextAction() assert(replacement.target == first)

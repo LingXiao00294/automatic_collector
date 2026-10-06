@@ -5,15 +5,24 @@ local CollectorBrain = Class(Brain, function(self, inst)
     Brain._ctor(self, inst)
 end)
 
+local function Available(inst)
+    return inst.components.ac_worker:IsWorking() and not inst.sg:HasStateTag("busy")
+end
+
 function CollectorBrain:OnStart()
     self.bt = BT(self.inst, PriorityNode({
         WhileNode(function()
-            return self.inst.components.ac_worker:IsWorking() and not self.inst.sg:HasStateTag("busy")
+            return Available(self.inst)
         end, "Collector available", DoAction(self.inst, function(inst)
-            return inst.components.ac_worker:GetNextAction()
+            return inst.components.ac_worker:GetNextAction(false)
         end, "One collector job", false)),
+        WhileNode(function()
+            return Available(self.inst)
+        end, "Collector returning", DoAction(self.inst, function(inst)
+            return inst.components.ac_worker:GetHomeAction()
+        end, "Return home", false)),
         StandStill(self.inst),
-    }, .25))
+    }, .1, true))
 end
 
 function CollectorBrain:OnStop()

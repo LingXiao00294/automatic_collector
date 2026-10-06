@@ -1,6 +1,7 @@
 local brain = require("brains/ac_collectorbrain")
 local Upgrades = require("ac_upgrades")
 local Sounds = require("ac_sounds")
+local Navigation = require("ac_navigation")
 local assets = {
     Asset("ANIM", "anim/automatic_collector.zip"),
     Asset("ANIM", "anim/automatic_collector_mk2.zip"),
@@ -92,6 +93,7 @@ local function fn()
     inst.components.locomotor:SetTriggersCreep(false)
     inst.components.locomotor.pathcaps = { ignorecreep = true, allowocean = false }
     inst:AddComponent("ac_worker")
+    Navigation.Attach(inst)
     inst:AddComponent("ac_upgradable")
     inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
     inst:ListenForEvent("ac_harvestenabledchanged", Sounds.OnEnabledChanged)
