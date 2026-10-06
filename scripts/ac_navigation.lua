@@ -7,6 +7,7 @@ local FINE_GRID = .25
 local MAX_NODES = 4096
 local CLEARANCE = .05
 local RECHECK = .25
+local MAX_SNAPSHOT_AGE = .5
 local STUCK_TIME = 1.5
 local FRAME_BUDGET = 128
 local SEARCH_SLICE = 16
@@ -248,6 +249,10 @@ end
 
 local function PauseMovement(locomotor)
     locomotor:StopMoving()
+    local state = locomotor._ac_navigation
+    if state ~= nil and state.refreshing and state.refresh_paused == nil then
+        state.refresh_paused = GetTime()
+    end
     if not locomotor._ac_navigation_paused then
         locomotor._ac_navigation_paused = true
         locomotor.inst:PushEvent("locomote")
@@ -268,6 +273,7 @@ local function CompleteSearch(state, context, steps, goal)
     state.validate = true
     state.progress = LocalPoint(context.platform, locomotor.inst:GetPosition())
     state.progress_time, state.nextcheck = GetTime(), GetTime() + RECHECK
+    state.snapshot_time = GetTime()
     state.goal = goal
     if steps ~= nil then
         state.localsteps = steps
@@ -300,8 +306,13 @@ local function PumpRefreshes()
             else
                 scheduler.remaining, scheduler.refreshes = scheduler.remaining - 1, scheduler.refreshes - 1
                 state.context = Context(locomotor.inst, state.radius, state.target)
-                -- Time spent deliberately paused in this queue is not a physics stall.
-                state.progress_time = state.progress_time + GetTime() - state.refresh_started
+                state.snapshot_time = GetTime()
+                -- Only actual stopped time is exempt. Background rechecks must
+                -- not hide a physical stall while a car is still told to move.
+                if state.refresh_paused ~= nil then
+                    state.progress_time = state.progress_time + GetTime() - state.refresh_paused
+                    state.refresh_paused = nil
+                end
                 state.validate = true
             end
         else
@@ -528,7 +539,7 @@ function M.Attach(inst)
         local state = self._ac_navigation
         if state ~= nil and self.dest ~= nil then
             if not self.dest:IsValid() then inst.components.ac_worker:Cancel(true, "target_changed") return end
-            if state.searching or state.refreshing then PauseMovement(self) return end
+            if state.searching then PauseMovement(self) return end
             if state.context == nil then self:Clear() return end
             if state.failed then Reject(self, state.failure_reason) return end
             state.dt = math.max(dt or 0, FRAMES)
@@ -546,14 +557,25 @@ function M.Attach(inst)
                 end
             end
             local time = GetTime()
-            if not state.validate and not arrive_check_only and time >= state.nextcheck then
+            if not state.validate and not state.refreshing and not arrive_check_only and time >= state.nextcheck then
                 state.refreshing = true
-                state.refresh_started = time
                 scheduler.refresh_tail = scheduler.refresh_tail + 1
                 scheduler.refresh_queue[scheduler.refresh_tail] = state
                 PumpSearches()
-                if state.refreshing then PauseMovement(self) return end
                 if state.failed then Reject(self, state.failure_reason) return end
+            end
+            if state.refreshing then
+                local goal = Vector3(self.dest:GetPoint())
+                local arrive = math.max(self.arrive_dist or 0, self:GetRunSpeed() * (dt or 0) * .5)
+                -- Continue the validated route during a short background queue.
+                -- Expired snapshots, changed goals and interaction arrival need
+                -- a fresh check before movement or native action dispatch.
+                if time - state.snapshot_time >= MAX_SNAPSHOT_AGE
+                    or DistanceSq(LocalPoint(platform, goal), state.goal) > .25 ^ 2
+                    or DistanceSq(inst:GetPosition(), goal) <= arrive ^ 2 then
+                    PauseMovement(self)
+                    return
+                end
             end
             if state.validate then
                 state.validate = nil

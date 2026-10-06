@@ -56,6 +56,9 @@ SCENARIOS = [
     "navigation_refresh_obstacles_change",
     "navigation_refresh_with_busy_search",
     "navigation_queued_refresh_platform_removed",
+    "navigation_refresh_snapshot_expires",
+    "navigation_refresh_arrival_waits",
+    "navigation_refresh_movement_counts_for_stuck",
 ]
 
 
@@ -214,6 +217,8 @@ def test_native_brain_dispatch(navigation, scenario):
         "navigation_native_idle_wakeup",
         "navigation_native_blocked_return_dispatch",
         "navigation_native_queued_search_lifecycle",
+        "navigation_native_transport_continuous",
+        "navigation_native_short_pause_resumes",
     ],
 )
 def test_native_dispatch_lifecycle(navigation, scenario):
