@@ -19,6 +19,10 @@ local function visuals(inst)
     inst.MiniMapEntity = { SetIcon = function(_, v) inst.mapicon = v end }
     inst.SoundEmitter = { PlaySound = function() inst.sounds = (inst.sounds or 0) + 1 end }
     inst.SoundEmitter.KillSound = function() end
+    inst.Physics = { radius = .35 }
+    function inst.Physics:SetCapsule(radius, height) self.radius, self.height = radius, height end
+    function inst.Physics:GetRadius() return self.radius end
+    function inst.Physics:IsActive() return false end
 end
 
 local function prepare(count, worker)
@@ -42,6 +46,7 @@ function scenarios.upgrade_single_and_stack()
         local guid = w.inst
         assert(installer:Install(player, w.inst))
         assert(w.inst == guid and Upgrades.IsAdvanced(w.inst))
+        assert(w.inst.Physics:GetRadius() == .25 and w.inst.Physics.height == 1)
         assert(w.inst.components.locomotor.walkspeed == 6 and w.action_speed == 1)
         assert(w.inst.bank == "automatic_collector_mk2" and w.inst.build == w.inst.bank)
         assert(w.inst.mapicon == "automatic_collector_mk2.tex")
@@ -111,6 +116,7 @@ function scenarios.upgrade_apply_rollback()
     assert(not installer:Install(player, w.inst))
     API.upgrades[Upgrades.CHASSIS].apply = original
     assert(not Upgrades.IsAdvanced(w.inst) and w.inst.bank == "automatic_collector")
+    assert(w.inst.Physics:GetRadius() == .35, "Failed installation must restore the base collision radius")
     assert(w.inst.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 0)
     assert(w.inst.components.locomotor.walkspeed == 4.5 and w.action_speed == 1.25)
     assert(w.radius == 9 and w.inst._ac_radius:value() == 9)
@@ -385,13 +391,16 @@ function scenarios.upgrade_prefab_client_and_host()
     TheWorld.ismastersim = false
     local client = prefab.fn()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
+    assert(client.Physics:GetRadius() == .35)
     assert(client._ac_harvest_enabled:value())
     client._ac_mk2:set(true)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
+    assert(client.Physics:GetRadius() == .25)
     assert(client:displaynamefn() == "采集车")
     seed = true
     local late = prefab.fn()
     assert(late.bank == "automatic_collector_mk2" and late.components.ac_upgradable == nil)
+    assert(late.Physics:GetRadius() == .25)
     seed, TheWorld.ismastersim = false, true
     local host = prefab.fn()
     assert(host.components.inventoryitem.canbepickedup == false,
@@ -399,6 +408,7 @@ function scenarios.upgrade_prefab_client_and_host()
     assert(not host.components.ac_worker:IsHarvestEnabled())
     host.components.ac_upgradable:OnLoad({ levels = { [Upgrades.CHASSIS] = 1 } })
     assert(host.bank == "automatic_collector_mk2" and host.components.locomotor.walkspeed == 6)
+    assert(host.Physics:GetRadius() == .25)
     assert(host.components.ac_worker.radius == 20 and host._ac_radius:value() == 20)
     assert(host.components.inventoryitem.atlasname == "images/inventoryimages/automatic_collector_mk2.xml")
     assert(host.components.inventoryitem.imagename == "automatic_collector_mk2")
@@ -463,11 +473,13 @@ function scenarios.upgrade_load_idempotent_and_relocate()
     restored.inst.components.ac_upgradable:OnLoad(data)
     restored.inst.components.ac_upgradable:OnLoad(data)
     assert(restored.inst.components.locomotor.walkspeed == 6 and restored.action_speed == 1)
+    assert(restored.inst.Physics:GetRadius() == .25)
     assert(restored.inst.components.ac_upgradable:GetLevel("unknown_extension") == 4)
     restored:OnPickup(nil) restored:OnDropped()
     assert(Upgrades.IsAdvanced(restored.inst) and restored.inst.components.locomotor.walkspeed == 6)
     assert(restored.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
     assert(restored.inst.components.locomotor.walkspeed == 3 and restored.inst.bank == "automatic_collector")
+    assert(restored.inst.Physics:GetRadius() == .35)
     local legacy = prepare() legacy.inst.components.ac_upgradable:OnLoad(nil)
     assert(not Upgrades.IsAdvanced(legacy.inst) and legacy.inst.components.locomotor.walkspeed == 3)
 end

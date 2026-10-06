@@ -4,7 +4,7 @@ local H = upgrade_contract
 local Navigation = require("ac_navigation")
 local bit = bit
 local time, ground = 0, function() return true end
-local pathground
+local pathground, pathwalls
 GetTime = function() return time end
 GetTick = function() return math.floor(time / FRAMES + .5) end
 GetTickTime = function() return FRAMES end
@@ -21,10 +21,14 @@ function TheWorld.Map:GetPlatformAtPoint(x, _, z)
         if boat:IsValid() and boat:GetDistanceSqToPoint(Vector3(x,0,z)) <= boat.radius^2 then return boat end
     end
 end
-function TheWorld.Pathfinder:IsClear(x1, _, z1, x2, _, z2)
+function TheWorld.Pathfinder:IsClear(x1, _, z1, x2, _, z2, caps)
     local samples = math.max(1, math.ceil(math.sqrt(distsq(x1,z1,x2,z2)) / .1))
     for i = 0, samples do
-        if not (pathground or ground)(x1+(x2-x1)*i/samples, z1+(z2-z1)*i/samples) then return false end
+        local x, z = x1+(x2-x1)*i/samples, z1+(z2-z1)*i/samples
+        if not (pathground or ground)(x,z)
+            or (pathwalls ~= nil and not (caps ~= nil and caps.ignorewalls) and not pathwalls(x,z)) then
+            return false
+        end
     end
     return true
 end
@@ -49,8 +53,8 @@ local function blocker(x, z, radius, group, mask)
     return ent
 end
 
-local function prepare(w)
-    local inst = physics(w.inst, .35, CHARACTERS, bit.bor(CHARACTERS,OBSTACLES))
+local function prepare(w, radius)
+    local inst = physics(w.inst, radius or .35, CHARACTERS, bit.bor(CHARACTERS,OBSTACLES))
     local rotation = 0
     function inst.Transform:GetRotation() return rotation end
     function inst.Transform:SetRotation(value) rotation = value end
@@ -190,7 +194,7 @@ local function tick(w, frozen, before)
         if ent ~= inst and other ~= nil and other:IsActive()
             and bit.band(other:GetCollisionMask(), inst.Physics:GetCollisionGroup()) ~= 0
             and bit.band(inst.Physics:GetCollisionMask(), other:GetCollisionGroup()) ~= 0 then
-            canmove = canmove and distsq(x,z,ent.x,ent.z) >= (other:GetRadius()+.35)^2
+            canmove = canmove and distsq(x,z,ent.x,ent.z) >= (other:GetRadius()+inst.Physics:GetRadius())^2
         end
     end
     if canmove then inst.x, inst.z = x, z end
@@ -254,6 +258,109 @@ function scenarios.navigation_collision_masks()
     local action = begin(w)
     assert(#loco.path.steps == 3, "Non-colliding and inactive physics must not obstruct the route")
     deliver(w,action)
+end
+
+local function narrow_corridor(startx)
+    local w = H.worker(startx) w.inst.z = -3 w:SetHome()
+    local loco = prepare(w,.25)
+    local c = physics(H.chest(.4),.3,OBSTACLES,CHARACTERS) c.z = 4
+    for z = 0, 6 do blocker(-.6,z,.5) blocker(1.4,z,.5) end
+    blocker(.4,6,.5)
+    w.inst.components.inventory:GiveItem(H.item("rocks",startx,nil,7))
+    return w,loco,c
+end
+
+function scenarios.navigation_narrow_offset_corridor()
+    local w,loco,c = narrow_corridor(0)
+    local action = begin(w)
+    assert(loco.dest ~= nil, "The .5-diameter cart must find the off-grid, 1-unit-wide corridor")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_narrow_wall_path_tiles()
+    local w,loco,c = narrow_corridor(.4)
+    -- Wall path tiles can cover physically clear space beside their round bodies.
+    pathwalls = function(x,z) return z < -.5 or z > 6.5 or x < -1.5 or x > 2.5 end
+    local action = begin(w)
+    assert(loco.dest ~= nil, "Coarse wall path tiles must not close a physically clear corridor")
+    assert(loco.path ~= nil and #loco.path.steps == 3)
+    assert(loco.pathcaps.ignorewalls == nil, "Native locomotor capabilities must not be mutated")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_narrow_closed_corridor()
+    local w,loco,c = narrow_corridor(0)
+    blocker(.4,1,.5)
+    pathwalls = function() return false end
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and loco.dest == nil and w:IsCoolingDown(c),
+        "Wall tile precision must not let a cart cross a real physical wall")
+    assert(w:GetCargo().components.stackable:StackSize() == 7)
+end
+
+local function moonbase_tile()
+    -- A 4x4 tile, walls immediately outside its boundary, and the native
+    -- moonbase's radius-1 body at its centre. Start between coarse grid lines.
+    blocker(0,0,1)
+    for i = 0, 5 do
+        local offset = i - 2.5
+        blocker(offset,-2.5,.5) blocker(offset,2.5,.5)
+        blocker(-2.5,offset,.5) blocker(2.5,offset,.5)
+    end
+    local c = physics(H.chest(.4),.3,OBSTACLES,CHARACTERS) c.z = 1.5
+    return c
+end
+
+function scenarios.navigation_moonbase_walled_tile()
+    local c = moonbase_tile()
+    local w = H.worker(.375) w.inst.z = -1.625 w:SetHome()
+    local loco = prepare(w,.25)
+    w.inst.components.inventory:GiveItem(H.item("rocks",.4,nil,7))
+    local action = begin(w)
+    assert(loco.dest ~= nil, "The cart must use the real clearance between a moonbase and surrounding walls")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_moonbase_shared_refinement()
+    moonbase_tile()
+    local cars, calls, tick_id, maximum = {}, 0, GetTick(), 0
+    local clear = TheWorld.Pathfinder.IsClear
+    TheWorld.Pathfinder.IsClear = function(self, ...)
+        if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
+        calls = calls + 1 maximum = math.max(maximum,calls)
+        assert(calls <= 1200, "Fine-grid fallback must share the same frame budget across all carts")
+        return clear(self, ...)
+    end
+    for _ = 1, 8 do
+        local w = H.worker(.375) w.inst.z = -1.625 w:SetHome()
+        local loco = prepare(w,.25)
+        w.inst.components.inventory:GiveItem(H.item("rocks",.375,nil,7))
+        begin(w,nil,false)
+        table.insert(cars,{worker=w,loco=loco})
+    end
+    local completed = 0
+    for _ = 1, 300 do
+        time = time + FRAMES
+        for _, car in ipairs(cars) do
+            if not car.done then
+                car.loco:OnUpdate(FRAMES)
+                assert(car.worker.pending ~= nil, "Every cart must find the narrow route")
+                if not car.loco._ac_navigation.searching then
+                    assert(car.loco.path ~= nil and car.worker:GetCargo().components.stackable:StackSize() == 7)
+                    car.worker:Cancel(true)
+                    car.done, completed = true, completed + 1
+                end
+            end
+        end
+        if completed == #cars then break end
+    end
+    assert(completed == 8, "No fine-grid search may starve behind the other carts")
+    TheWorld.Pathfinder.IsClear = clear
+    return {maximum=maximum,cars=completed}
 end
 
 function scenarios.navigation_shared_search_budget()

@@ -3,6 +3,7 @@ local M = {}
 local bit = bit
 
 local GRID = .75
+local FINE_GRID = .25
 local MAX_NODES = 4096
 local CLEARANCE = .05
 local RECHECK = .25
@@ -31,7 +32,12 @@ local function Context(inst, radius, target)
     local physics = inst.Physics
     local context = { home = home, radius = radius, platform = inst:GetCurrentPlatform(),
         clearance = physics:GetRadius() + CLEARANCE,
-        pathcaps = inst.components.locomotor.pathcaps, target = target, blockers = {} }
+        pathcaps = {}, target = target, blockers = {} }
+    for key, value in pairs(inst.components.locomotor.pathcaps or {}) do context.pathcaps[key] = value end
+    -- Native wall tiles are coarser than narrow gaps between actual bodies.
+    -- Keep terrain checks, and test walls against their real collision circles.
+    -- This copy is only for our queries; native movement capabilities stay intact.
+    context.pathcaps.ignorewalls = true
     -- Physics masks also cover modded statues and walls. Collector-to-collector
     -- congestion is handled by native character physics and the stuck backoff,
     -- rather than rebuilding static routes around each moving/overlapping cart.
@@ -47,6 +53,7 @@ local function Context(inst, radius, target)
             point.physics_radius, point.entity = other:GetRadius(), ent
             -- Players and creatures do not obstruct the final interaction reach.
             point.character = other:GetCollisionGroup() == COLLISION.CHARACTERS
+            if not point.character and ent ~= target then context.refine = true end
             if context.platform ~= nil then point.localpos = LocalPoint(context.platform, point) end
             table.insert(context.blockers, point)
         end
@@ -185,21 +192,18 @@ local function Pop(heap)
     return first
 end
 
-local function Plan(context, start, goal, arrive)
-    local endpoint = Approach(context, start, goal, arrive)
-    if endpoint ~= nil then return { start, endpoint, goal } end
+local function Search(context, start, goal, arrive, grid, budget)
     local first = { x = start.x, y = 0, z = start.z, i = 0, j = 0, cost = 0, score = 0 }
     local nodes, heap = { ["0:0"] = first }, {}
     Push(heap, first)
-    local expanded = 0
-    while #heap > 0 and expanded < MAX_NODES do
+    while #heap > 0 and budget.remaining > 0 do
         local entry = Pop(heap)
         local node = entry.node
         if not node.closed and node.cost == entry.cost then
             SpendBudget()
             node.closed = true
-            expanded = expanded + 1
-            endpoint = Approach(context, node, goal, arrive)
+            budget.remaining = budget.remaining - 1
+            local endpoint = Approach(context, node, goal, arrive)
             if endpoint ~= nil then
                 local reverse = { endpoint }
                 while node ~= nil do
@@ -216,11 +220,11 @@ local function Plan(context, start, goal, arrive)
                 local key = i .. ":" .. j
                 local nextnode = nodes[key]
                 if nextnode == nil then
-                    nextnode = { x = start.x + i * GRID, y = 0, z = start.z + j * GRID,
+                    nextnode = { x = start.x + i * grid, y = 0, z = start.z + j * grid,
                         i = i, j = j, cost = math.huge }
                     nodes[key] = nextnode
                 end
-                local cost = node.cost + GRID * math.sqrt(direction[1] ^ 2 + direction[2] ^ 2)
+                local cost = node.cost + grid * math.sqrt(direction[1] ^ 2 + direction[2] ^ 2)
                 if not nextnode.closed and cost < nextnode.cost and SegmentClear(context, node, nextnode) then
                     nextnode.cost, nextnode.parent = cost, node
                     nextnode.score = cost + math.max(0, math.sqrt(DistanceSq(nextnode, goal)) - arrive)
@@ -230,6 +234,19 @@ local function Plan(context, start, goal, arrive)
         end
     end
     return nil
+end
+
+local function Plan(context, start, goal, arrive)
+    local endpoint = Approach(context, start, goal, arrive)
+    if endpoint ~= nil then return { start, endpoint, goal } end
+    local budget = { remaining = MAX_NODES }
+    local steps = Search(context, start, goal, arrive, GRID, budget)
+    -- Refinement can enter a clear gap that contains no coarse-grid waypoint.
+    -- Both passes share the node cap as well as the world's per-frame budget.
+    if steps == nil and context.refine then
+        steps = Search(context, start, goal, arrive, FINE_GRID, budget)
+    end
+    return steps
 end
 
 local function PauseMovement(locomotor)
