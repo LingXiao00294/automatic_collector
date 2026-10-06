@@ -7,6 +7,7 @@ local PATH_RETRY_DELAY = .5
 -- Only a plan that found no route at all. A stuck or displaced car already
 -- re-planned internally, or left the target's platform behind.
 local PATH_FAILURES = { unreachable = true }
+local NAVIGATION_FAILURES = { unreachable = true, stuck = true, search_timeout = true }
 
 local Worker = Class(function(self, inst)
     self.inst = inst
@@ -20,6 +21,7 @@ local Worker = Class(function(self, inst)
     self.pending = nil
     self.cooldowns = setmetatable({}, { __mode = "k" })
     self.pathfails = setmetatable({}, { __mode = "k" })
+    self.navigation_failures = setmetatable({}, { __mode = "k" })
     self.action_speed = 1
     self.nextscan = 0
     self.nextreturn = 0
@@ -88,6 +90,15 @@ end
 
 function Worker:IsCoolingDown(target)
     return (self.cooldowns[target] or 0) > GetTime()
+end
+
+function Worker:IsWaitingForRoute(target)
+    return self.navigation_failures[target] == true and self:IsCoolingDown(target)
+end
+
+function Worker:BackoffHome()
+    self.homepathfails = math.min((self.homepathfails or 0) + 1, 6)
+    self.nextreturn = GetTime() + math.min(self.config.retry_delay, PATH_RETRY_DELAY * 2 ^ (self.homepathfails - 1))
 end
 
 function Worker:GetCargo()
@@ -242,8 +253,10 @@ function Worker:Finish(action, success)
             delay = math.min(delay, PATH_RETRY_DELAY * 2 ^ (fails - 1))
         end
         self.cooldowns[target] = GetTime() + delay
+        self.navigation_failures[target] = NAVIGATION_FAILURES[self.pending.failure_reason] == true or nil
     elseif success and target ~= nil then
         self.pathfails[target] = nil
+        self.navigation_failures[target] = nil
     end
     if not success then
         self.last_failure = self.pending.failure_reason or (self.pending.replan and "target_changed" or "action_failed")
@@ -366,7 +379,9 @@ end
 function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
         or GetTime() - self.pending.started > self.config.action_timeout) then
-        self:Cancel(false, self:IsWorking() and "timeout" or "inactive")
+        local navigation = self.inst.components.locomotor._ac_navigation
+        local reason = navigation ~= nil and navigation.searching and "search_timeout" or "timeout"
+        self:Cancel(false, self:IsWorking() and reason or "inactive")
     elseif self.pending ~= nil and not self:ValidateAction(self.pending.action) then
         -- Targets can be picked, harvested or removed while we are still walking.
         -- Notify DoAction, release the claim and clear movement for every job kind.
@@ -383,8 +398,11 @@ function Worker:GetHomeAction()
     if not self:IsWorking() or self.pending ~= nil or GetTime() < self.nextreturn then return nil end
     local home = self:GetHome()
     if self.inst:GetDistanceSqToPoint(home) > 1 then
-        return BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, home, nil, .5)
+        local action = BufferedAction(self.inst, nil, ACTIONS.WALKTO, nil, home, nil, .5)
+        action:AddSuccessAction(function() self.homepathfails, self.nextreturn = nil, 0 end)
+        return action
     end
+    self.homepathfails = nil
 end
 
 function Worker:GetNextAction(allow_return)
@@ -431,6 +449,13 @@ function Worker:GetNextAction(allow_return)
         end
     end
     if target == nil then
+        -- A real receiver still accepts this cargo, but its route failed.
+        -- Keep the same entity aboard while retrying, rather than passing it
+        -- between nearby cars that each have their own destination cooldowns.
+        if cargo ~= nil and Targets.FindContainer(self, cargo, nil, true) ~= nil then
+            self:SetBlocked(true)
+            return nil
+        end
         -- Native storage_robot's GoHomeAction drops one whole cargo stack at
         -- the current position before walking home. Do not keep undeliverable
         -- cargo aboard or discard other groups that may still have a destination.
@@ -487,6 +512,8 @@ function Worker:OnDropped()
     self.farm_count, self.farm_draining = 0, false
     self.cooldowns = setmetatable({}, { __mode = "k" })
     self.pathfails = setmetatable({}, { __mode = "k" })
+    self.navigation_failures = setmetatable({}, { __mode = "k" })
+    self.homepathfails = nil
     self.nextscan = 0
     self.nextreturn = 0
     self:SetEnabled(true)

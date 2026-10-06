@@ -23,6 +23,9 @@ SCENARIOS = [
     "navigation_home_detour",
     "navigation_boat_moves",
     "navigation_boat_stuck",
+    "navigation_queued_boat_moves",
+    "navigation_queued_platform_removed",
+    "navigation_queued_obstacles_change",
     "navigation_cancel_and_retry",
     "navigation_overlapping_blocker_escape",
     "navigation_blocked_pickup_releases_claim",
@@ -36,6 +39,14 @@ SCENARIOS = [
     "navigation_grid_arrival_point",
     "navigation_plain_waypoints",
     "navigation_trace_explains_cooldown",
+    "navigation_shared_search_budget",
+    "navigation_cancel_queued_search",
+    "navigation_crowded_collectors",
+    "navigation_delivery_waits_for_route",
+    "navigation_waiting_delivery_loses_capacity",
+    "navigation_home_retry_backoff",
+    "navigation_queued_search_capacity_changes",
+    "navigation_enclosed_cargo_conservation",
 ]
 
 
@@ -178,6 +189,7 @@ def test_native_brain_dispatch(navigation, scenario):
         "navigation_native_return_dispatch",
         "navigation_native_idle_wakeup",
         "navigation_native_blocked_return_dispatch",
+        "navigation_native_queued_search_lifecycle",
     ],
 )
 def test_native_dispatch_lifecycle(navigation, scenario):

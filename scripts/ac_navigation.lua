@@ -7,6 +7,9 @@ local MAX_NODES = 4096
 local CLEARANCE = .05
 local RECHECK = .25
 local STUCK_TIME = 1.5
+local FRAME_BUDGET = 128
+local SEARCH_SLICE = 16
+local scheduler
 local EXCLUDE = { "INLIMBO", "FX" }
 local DIRECTIONS = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 },
     { 1, 1 }, { -1, 1 }, { -1, -1 }, { 1, -1 } }
@@ -29,18 +32,20 @@ local function Context(inst, radius, target)
     local context = { home = home, radius = radius, platform = inst:GetCurrentPlatform(),
         clearance = physics:GetRadius() + CLEARANCE,
         pathcaps = inst.components.locomotor.pathcaps, target = target, blockers = {} }
-    -- Physics masks, rather than prefab names/tags, also cover modded statues and walls.
+    -- Physics masks also cover modded statues and walls. Collector-to-collector
+    -- congestion is handled by native character physics and the stuck backoff,
+    -- rather than rebuilding static routes around each moving/overlapping cart.
     local scanradius = radius + (MAX_PHYSICS_RADIUS or 4) + context.clearance
     for _, ent in ipairs(TheSim:FindEntities(home.x, 0, home.z, scanradius, nil, EXCLUDE)) do
         local other = ent.Physics
-        if ent ~= inst and other ~= nil and other:IsActive()
+        if ent ~= inst and not ent:HasTag("automatic_collector") and other ~= nil and other:IsActive()
             and bit.band(other:GetCollisionMask(), physics:GetCollisionGroup()) ~= 0
             and bit.band(physics:GetCollisionMask(), other:GetCollisionGroup()) ~= 0
             and ent:GetCurrentPlatform() == context.platform then
             local point = ent:GetPosition()
             point.radius = other:GetRadius() + context.clearance
             point.physics_radius, point.entity = other:GetRadius(), ent
-            -- Players, creatures and other cars yield and get pushed apart.
+            -- Players and creatures do not obstruct the final interaction reach.
             point.character = other:GetCollisionGroup() == COLLISION.CHARACTERS
             if context.platform ~= nil then point.localpos = LocalPoint(context.platform, point) end
             table.insert(context.blockers, point)
@@ -51,6 +56,10 @@ end
 
 local function OnGround(context, x, z)
     if context.platform ~= nil then
+        if context.local_coordinates then
+            local worldx, _, worldz = context.platform.entity:LocalToWorldSpace(x, 0, z)
+            x, z = worldx, worldz
+        end
         return TheWorld.Map:GetPlatformAtPoint(x, 0, z) == context.platform
     end
     return TheWorld.Map:IsPassableAtPoint(x, 0, z, false, true)
@@ -130,11 +139,17 @@ local function Approach(context, point, goal, arrive)
         and InteractionClear(context, endpoint, goal) and endpoint or nil
 end
 
+local function SpendBudget()
+    if scheduler.slice == 0 then coroutine.yield() end
+    scheduler.slice = scheduler.slice - 1
+end
+
 local function Smooth(context, steps)
     local result, index = { steps[1] }, 1
     while index < #steps - 1 do
         local next_index = index + 1
         for i = #steps - 1, index + 2, -1 do
+            SpendBudget()
             if SegmentClear(context, steps[index], steps[i]) then next_index = i break end
         end
         table.insert(result, steps[next_index])
@@ -181,6 +196,7 @@ local function Plan(context, start, goal, arrive)
         local entry = Pop(heap)
         local node = entry.node
         if not node.closed and node.cost == entry.cost then
+            SpendBudget()
             node.closed = true
             expanded = expanded + 1
             endpoint = Approach(context, node, goal, arrive)
@@ -216,36 +232,130 @@ local function Plan(context, start, goal, arrive)
     return nil
 end
 
+local function PauseMovement(locomotor)
+    locomotor:StopMoving()
+    if not locomotor._ac_navigation_paused then
+        locomotor._ac_navigation_paused = true
+        locomotor.inst:PushEvent("locomote")
+    end
+end
+
+local function CancelSearch(state)
+    if state ~= nil then
+        state.search, state.locomotor, state.context, state.dest, state.target = nil, nil, nil, nil, nil
+        state.searching = false
+    end
+end
+
+local function CompleteSearch(state, context, steps, goal)
+    local locomotor = state.locomotor
+    state.search, state.searching = nil, false
+    state.context, state.failed = context, steps == nil
+    state.validate = true
+    state.progress = LocalPoint(context.platform, locomotor.inst:GetPosition())
+    state.progress_time, state.nextcheck = GetTime(), GetTime() + RECHECK
+    state.goal = goal
+    if steps ~= nil then
+        state.localsteps = steps
+        local worldsteps = {}
+        for i, step in ipairs(steps) do worldsteps[i] = WorldPoint(context.platform, step) end
+        locomotor.path = { steps = worldsteps, currentstep = 2 }
+    end
+    locomotor.inst.components.ac_worker:Trace(steps ~= nil and "path_found" or "path_failed", state.target,
+        steps ~= nil and "waypoints=" .. tostring(#steps) or "unreachable")
+end
+
+local function PumpSearches()
+    local tick = math.floor(GetTime() / FRAMES + .5)
+    if scheduler == nil or scheduler.world ~= TheWorld then
+        scheduler = { world = TheWorld, queue = {}, head = 1, tail = 0 }
+    end
+    if scheduler.tick ~= tick then scheduler.tick, scheduler.remaining = tick, FRAME_BUDGET end
+    while scheduler.remaining > 0 and scheduler.head <= scheduler.tail do
+        local state = scheduler.queue[scheduler.head]
+        scheduler.queue[scheduler.head] = nil
+        scheduler.head = scheduler.head + 1
+        local locomotor = state.locomotor
+        if locomotor ~= nil and locomotor._ac_navigation == state and locomotor.dest == state.dest
+            and locomotor.inst:IsValid() and locomotor.inst.components.ac_worker:IsWorking()
+            and locomotor.dest:IsValid() then
+            local context = state.context
+            if context ~= nil and (locomotor.inst:GetCurrentPlatform() ~= context.platform
+                or (context.platform ~= nil and not context.platform:IsValid())) then
+                state.search, state.searching, state.failed = nil, false, true
+                state.failure_reason = "platform_changed"
+            else
+                local quota = math.min(SEARCH_SLICE, scheduler.remaining)
+                scheduler.slice = quota
+                local ok, result, steps, goal = coroutine.resume(state.search)
+                assert(ok, result)
+                scheduler.remaining = scheduler.remaining - (quota - scheduler.slice)
+                if coroutine.status(state.search) == "dead" then
+                    CompleteSearch(state, result, steps, goal)
+                else
+                    scheduler.tail = scheduler.tail + 1
+                    scheduler.queue[scheduler.tail] = state
+                end
+            end
+        else
+            CancelSearch(state)
+        end
+    end
+    if scheduler.head > scheduler.tail then scheduler.queue, scheduler.head, scheduler.tail = {}, 1, 0 end
+end
+
 local function FindPath(locomotor)
     local inst, worker = locomotor.inst, locomotor.inst.components.ac_worker
     if locomotor.dest == nil or not locomotor.dest:IsValid() then return end
     local previous = locomotor._ac_navigation
+    if previous ~= nil and previous.dest == locomotor.dest and previous.searching then
+        PumpSearches()
+        return
+    end
     if previous ~= nil and previous.dest ~= locomotor.dest then previous = nil end
     local kind = worker.pending ~= nil and worker.pending.kind or nil
     local radius = worker.radius + ((kind == "pickup" or kind == "hammer") and 2 or 0)
-    local start, goal = inst:GetPosition(), Vector3(locomotor.dest:GetPoint())
+    local start = inst:GetPosition()
     -- A car restored outside its range or returning from drop tolerance may move
     -- inward without expanding its allowed distance beyond the starting point.
     radius = math.max(radius, previous ~= nil and previous.radius or
         math.sqrt(DistanceSq(start, worker:GetHome())))
     local target = worker.pending ~= nil and worker.pending.action.target or locomotor.dest.inst
-    local context = Context(inst, radius, target)
-    local steps = Plan(context, start, goal, locomotor.arrive_dist)
+    CancelSearch(locomotor._ac_navigation)
     locomotor:ResetPath()
-    local state = { dest = locomotor.dest, context = context, target = target, radius = radius,
-        failed = steps == nil, step = 2, dt = previous ~= nil and previous.dt or FRAMES,
-        goal = LocalPoint(context.platform, goal),
-        progress = previous ~= nil and previous.progress or LocalPoint(context.platform, start),
-        progress_time = previous ~= nil and previous.progress_time or GetTime(), nextcheck = GetTime() + RECHECK,
+    local state = { dest = locomotor.dest, locomotor = locomotor, target = target, radius = radius,
+        searching = true, step = 2, dt = previous ~= nil and previous.dt or FRAMES,
+        nextplan = GetTime() + RECHECK,
         retries = previous ~= nil and previous.retries or 0 }
     locomotor._ac_navigation = state
-    if steps ~= nil then
-        state.localsteps = {}
-        for i, step in ipairs(steps) do state.localsteps[i] = LocalPoint(context.platform, step) end
-        locomotor.path = { steps = steps, currentstep = 2 }
-    end
-    worker:Trace(steps ~= nil and "path_found" or "path_failed", target,
-        steps ~= nil and "waypoints=" .. tostring(#steps) or "unreachable")
+    -- Snapshot/query work starts only after obtaining the shared frame budget.
+    -- Round-robin slices prevent a crowd of unreachable targets blocking one tick.
+    state.search = coroutine.create(function()
+        SpendBudget()
+        local context = Context(inst, radius, target)
+        state.context = context
+        local platform = context.platform
+        -- Keep the entire in-progress search in the boat's coordinate system.
+        -- Map queries project into its current pose, even after a yielded frame.
+        if platform ~= nil then
+            context.local_coordinates = true
+            context.home = LocalPoint(platform, context.home)
+            for _, blocker in ipairs(context.blockers) do
+                blocker.x, blocker.z = blocker.localpos.x, blocker.localpos.z
+            end
+        end
+        local goal = LocalPoint(platform, Vector3(state.dest:GetPoint()))
+        local steps = Plan(context, LocalPoint(platform, inst:GetPosition()), goal, locomotor.arrive_dist)
+        SpendBudget()
+        -- Obstacles may change while queued; validate against a fresh snapshot
+        -- before resuming movement, not a quarter second after starting to walk.
+        return Context(inst, radius, target), steps, goal
+    end)
+    PumpSearches()
+    scheduler.tail = scheduler.tail + 1
+    scheduler.queue[scheduler.tail] = state
+    PumpSearches()
+    if state.searching then PauseMovement(locomotor) end
 end
 
 local function Reject(locomotor, reason)
@@ -255,7 +365,7 @@ local function Reject(locomotor, reason)
     -- Home failures throttle only return retries. New work may still start at once.
     -- Clear also notifies a home WALKTO's native failure listeners.
     worker.nextscan = 0
-    if not had_job then worker.nextreturn = GetTime() + .5 end
+    if not had_job then worker:BackoffHome() end
 end
 
 local function NextPoint(locomotor)
@@ -318,12 +428,25 @@ function M.Attach(inst)
     if locomotor._ac_navigation_attached then return end
     locomotor._ac_navigation_attached = true
     local onupdate, stop = locomotor.OnUpdate, locomotor.Stop
+    local clear, wants_to_move_forward = locomotor.Clear, locomotor.WantsToMoveForward
     local set_move_dir, set_motor_speed = locomotor.SetMoveDir, locomotor.SetMotorSpeed
     locomotor.FindPath = FindPath
     locomotor.Stop = function(self, ...)
+        CancelSearch(self._ac_navigation)
         self._ac_navigation = nil
         self._ac_steer_point = nil
+        self._ac_navigation_paused = nil
         return stop(self, ...)
+    end
+    locomotor.Clear = function(self, ...)
+        CancelSearch(self._ac_navigation)
+        self._ac_navigation, self._ac_navigation_paused = nil, nil
+        return clear(self, ...)
+    end
+    if wants_to_move_forward ~= nil then
+        locomotor.WantsToMoveForward = function(self, ...)
+            return not self._ac_navigation_paused and wants_to_move_forward(self, ...)
+        end
     end
     locomotor.SetMoveDir = function(self, direction, ...)
         if self._ac_steer_point ~= nil then
@@ -335,6 +458,7 @@ function M.Attach(inst)
     end
     locomotor.SetMotorSpeed = function(self, speed)
         local state = self._ac_navigation
+        if self._ac_navigation_paused or (state ~= nil and state.searching) then speed = 0 end
         if speed > 0 and state ~= nil and self.dest ~= nil and not AtGoal(self) then
             local point = NextPoint(self)
             if point ~= nil then
@@ -347,9 +471,13 @@ function M.Attach(inst)
         return set_motor_speed(self, speed)
     end
     locomotor.OnUpdate = function(self, dt, arrive_check_only)
+        PumpSearches()
         local state = self._ac_navigation
         if state ~= nil and self.dest ~= nil then
-            if state.failed then Reject(self) return end
+            if not self.dest:IsValid() then inst.components.ac_worker:Cancel(true, "target_changed") return end
+            if state.searching then PauseMovement(self) return end
+            if state.context == nil then self:Clear() return end
+            if state.failed then Reject(self, state.failure_reason) return end
             state.dt = math.max(dt or 0, FRAMES)
             local platform = state.context.platform
             if inst:GetCurrentPlatform() ~= platform
@@ -365,8 +493,9 @@ function M.Attach(inst)
                 end
             end
             local time = GetTime()
-            if not arrive_check_only and time >= state.nextcheck then
-                state.context = Context(inst, state.radius, state.target)
+            if state.validate or (not arrive_check_only and time >= state.nextcheck) then
+                if not state.validate then state.context = Context(inst, state.radius, state.target) end
+                state.validate = nil
                 state.nextcheck = time + RECHECK
                 local point = LocalPoint(platform, inst:GetPosition())
                 local moved = DistanceSq(point, state.progress) >= .1 ^ 2
@@ -380,13 +509,21 @@ function M.Attach(inst)
                     end
                     if state.retries > 2 then Reject(self, "stuck") return end
                     FindPath(self)
+                    if self._ac_navigation.searching then PauseMovement(self) return end
                     if self._ac_navigation.failed then Reject(self) return end
+                    state = self._ac_navigation
                 end
             end
             Advance(self, dt)
             if not RouteClear(self) then
+                if time < state.nextplan then PauseMovement(self) return end
                 FindPath(self)
+                if self._ac_navigation.searching then PauseMovement(self) return end
                 if self._ac_navigation.failed then Reject(self) return end
+            end
+            if self._ac_navigation_paused then
+                self._ac_navigation_paused = nil
+                inst:PushEvent("locomote")
             end
             if not AtGoal(self) then self._ac_steer_point = NextPoint(self) end
         end

@@ -6,7 +6,7 @@ function M.Describe(worker)
     local inst = worker.inst
     local status = inst.components.inventoryitem:IsHeld() and "已收起"
         or (not worker.enabled and "已暂停")
-        or (worker.blocked and "无接收箱子")
+        or (worker.blocked and "运输受阻")
         or (inst:IsAsleep() and "休眠")
         or (worker.pending ~= nil and (JOBS[worker.pending.kind] or "采集")) or "待机"
     local cargo = worker:GetCargo()

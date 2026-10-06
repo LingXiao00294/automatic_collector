@@ -47,7 +47,7 @@ strings.RECIPE_DESC.AUTOMATIC_COLLECTOR = "逐个收集，凑组运送。"
 strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR = {
     GENERIC = "它有自己的工作节奏。",
     PAUSED = "让它歇一会儿吧。",
-    BLOCKED = "它需要一个能接收货物的箱子。",
+    BLOCKED = "这批货暂时运不出去。",
     HELD = "放在地上，就能开始工作。",
 }
 
