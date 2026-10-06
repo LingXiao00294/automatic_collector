@@ -19,6 +19,10 @@ local function visuals(inst)
     inst.MiniMapEntity = { SetIcon = function(_, v) inst.mapicon = v end }
     inst.SoundEmitter = { PlaySound = function() inst.sounds = (inst.sounds or 0) + 1 end }
     inst.SoundEmitter.KillSound = function() end
+    inst.Physics = { radius = .25 }
+    function inst.Physics:SetCapsule(radius, height) self.radius, self.height = radius, height end
+    function inst.Physics:GetRadius() return self.radius end
+    function inst.Physics:IsActive() return false end
 end
 
 local function prepare(count, worker)
@@ -42,6 +46,7 @@ function scenarios.upgrade_single_and_stack()
         local guid = w.inst
         assert(installer:Install(player, w.inst))
         assert(w.inst == guid and Upgrades.IsAdvanced(w.inst))
+        assert(w.inst.Physics:GetRadius() == .25 and w.inst.Physics.height == 1)
         assert(w.inst.components.locomotor.walkspeed == 6 and w.action_speed == 1)
         assert(w.inst.bank == "automatic_collector_mk2" and w.inst.build == w.inst.bank)
         assert(w.inst.mapicon == "automatic_collector_mk2.tex")
@@ -111,6 +116,7 @@ function scenarios.upgrade_apply_rollback()
     assert(not installer:Install(player, w.inst))
     API.upgrades[Upgrades.CHASSIS].apply = original
     assert(not Upgrades.IsAdvanced(w.inst) and w.inst.bank == "automatic_collector")
+    assert(w.inst.Physics:GetRadius() == .25, "Failed installation must preserve the shared collision radius")
     assert(w.inst.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 0)
     assert(w.inst.components.locomotor.walkspeed == 4.5 and w.action_speed == 1.25)
     assert(w.radius == 9 and w.inst._ac_radius:value() == 9)
@@ -321,8 +327,15 @@ function scenarios.harvest_toggle_upgrade_and_load_order()
     assert(legacy_base.farm_count == 3 and legacy_base.farm_draining)
 end
 
-function scenarios.upgrade_prefab_client_and_host()
+local function prefab_runtime()
     local current, seed
+    local native_locomotor = {
+        SetTriggersCreep = function() end,
+        FindPath = function(self) self.native_paths = (self.native_paths or 0) + 1 end,
+        OnUpdate = function() end, Stop = function() end, Clear = function() end,
+        StopMoving = function() end, WantsToMoveForward = function() return false end,
+        SetMoveDir = function() end, SetMotorSpeed = function() end,
+    }
     Asset = function(...) return { ... } end
     Prefab = function(name, fn, assets) return { name = name, fn = fn, assets = assets } end
     MakeCharacterPhysics, MakeInventoryPhysics, MakeHauntableLaunch = function() end, function() end, function() end
@@ -357,8 +370,8 @@ function scenarios.upgrade_prefab_client_and_host()
                     SetOnDroppedFn = function(s, fn) s.ondroppedfn = fn end }
             elseif name == "inventory" then self.components[name] = H.inventory(self)
             elseif name == "locomotor" then
-                self.components[name] = { SetTriggersCreep = function() end, Stop = function() end,
-                    Clear = function() end, StopMoving = function() end }
+                self.components[name] = {}
+                for method, fn in pairs(native_locomotor) do self.components[name][method] = fn end
             elseif name == "ac_worker" then self.components[name] = require("components/ac_worker")(self)
             elseif name == "ac_upgradable" then self.components[name] = Upgradable(self)
             elseif name == "ac_upgradeitem" then self.components[name] = UpgradeItem(self)
@@ -379,26 +392,36 @@ function scenarios.upgrade_prefab_client_and_host()
     net_bool, net_float, net_entity = net, net, net
     package.loaded["prefabs/automatic_collector"] = nil
     local prefab = require("prefabs/automatic_collector")
+    return prefab, function(value) seed = value end, native_locomotor
+end
+
+function scenarios.upgrade_prefab_client_and_host()
+    local prefab, set_seed = prefab_runtime()
     local declared = {}
     for _, asset in ipairs(prefab.assets) do declared[asset[2]] = true end
     assert(declared["anim/automatic_collector_mk2.zip"])
     TheWorld.ismastersim = false
     local client = prefab.fn()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
+    assert(client.Physics:GetRadius() == .25)
     assert(client._ac_harvest_enabled:value())
     client._ac_mk2:set(true)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
+    assert(client.Physics:GetRadius() == .25)
     assert(client:displaynamefn() == "采集车")
-    seed = true
+    set_seed(true)
     local late = prefab.fn()
     assert(late.bank == "automatic_collector_mk2" and late.components.ac_upgradable == nil)
-    seed, TheWorld.ismastersim = false, true
+    assert(late.Physics:GetRadius() == .25)
+    set_seed(false)
+    TheWorld.ismastersim = true
     local host = prefab.fn()
     assert(host.components.inventoryitem.canbepickedup == false,
         "The action button must not pick up either car")
     assert(not host.components.ac_worker:IsHarvestEnabled())
     host.components.ac_upgradable:OnLoad({ levels = { [Upgrades.CHASSIS] = 1 } })
     assert(host.bank == "automatic_collector_mk2" and host.components.locomotor.walkspeed == 6)
+    assert(host.Physics:GetRadius() == .25)
     assert(host.components.ac_worker.radius == 20 and host._ac_radius:value() == 20)
     assert(host.components.inventoryitem.atlasname == "images/inventoryimages/automatic_collector_mk2.xml")
     assert(host.components.inventoryitem.imagename == "automatic_collector_mk2")
@@ -463,11 +486,13 @@ function scenarios.upgrade_load_idempotent_and_relocate()
     restored.inst.components.ac_upgradable:OnLoad(data)
     restored.inst.components.ac_upgradable:OnLoad(data)
     assert(restored.inst.components.locomotor.walkspeed == 6 and restored.action_speed == 1)
+    assert(restored.inst.Physics:GetRadius() == .25)
     assert(restored.inst.components.ac_upgradable:GetLevel("unknown_extension") == 4)
     restored:OnPickup(nil) restored:OnDropped()
     assert(Upgrades.IsAdvanced(restored.inst) and restored.inst.components.locomotor.walkspeed == 6)
     assert(restored.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
     assert(restored.inst.components.locomotor.walkspeed == 3 and restored.inst.bank == "automatic_collector")
+    assert(restored.inst.Physics:GetRadius() == .25)
     local legacy = prepare() legacy.inst.components.ac_upgradable:OnLoad(nil)
     assert(not Upgrades.IsAdvanced(legacy.inst) and legacy.inst.components.locomotor.walkspeed == 3)
 end
@@ -495,14 +520,15 @@ function scenarios.upgrade_work_timing_and_walk_reset()
 end
 
 -- Load the real modmain registration in a mod environment (without a running game).
-local function register_modmain()
+local function register_modmain(config)
     local callbacks, recipes, handlers = {}, {}, {}
     GLOBAL = { TUNING = TUNING, ACTIONS = ACTIONS, STRINGS = { NAMES = {}, RECIPE_DESC = {}, ACTIONS = {},
         CHARACTERS = { GENERIC = { DESCRIBE = {}, ACTIONFAIL = {} } } },
         Ingredient = function(name, count) return { name = name, count = count } end,
         TECH = { SCIENCE_TWO = {} }, ActionHandler = ActionHandler }
     Asset = function(...) return { ... } end
-    GetModConfigData = function() return nil end
+    config = config or {}
+    GetModConfigData = function(name) return config[name] end
     AddMinimapAtlas = function() end
     RegisterInventoryItemAtlas = function() end
     AddSimPostInit = function() end
@@ -514,6 +540,57 @@ local function register_modmain()
     AddStategraphActionHandler = function(name, handler) handlers[name .. ":" .. handler.action.id] = handler.state end
     assert(loadfile(TEST_ROOT .. "/modmain.lua"))()
     return callbacks, recipes, handlers
+end
+
+function scenarios.navigation_configuration()
+    assert(loadfile(TEST_ROOT .. "/modinfo.lua"))()
+    local option
+    for _, value in ipairs(configuration_options) do
+        if value.name == "new_navigation" then option = value end
+    end
+    assert(option ~= nil and option.default == true, "New navigation must be enabled by default")
+    assert(option.options[1].data == true and option.options[2].data == false)
+    local native_require = require
+    local function without_navigation(name)
+        assert(name ~= "ac_navigation", "Disabled navigation and clients must not load the planner")
+        return native_require(name)
+    end
+    for _, config in ipairs({ {}, { new_navigation = false }, { new_navigation = true } }) do
+        register_modmain(config)
+        local enabled = config.new_navigation ~= false
+        assert(TUNING.AUTOMATIC_COLLECTOR.new_navigation == enabled)
+        require = without_navigation
+        local prefab, _, native_locomotor = prefab_runtime()
+        TheWorld.ismastersim = false
+        assert(prefab.fn().components.locomotor == nil)
+        TheWorld.ismastersim = true
+        if enabled then require = native_require end
+        local function check_navigation(inst)
+            local loco = inst.components.locomotor
+            assert((loco._ac_navigation_attached == true) == enabled)
+            if not enabled then
+                for name, fn in pairs(native_locomotor) do assert(loco[name] == fn, name) end
+                loco:FindPath()
+                assert(loco.native_paths == 1, "Disabled navigation must keep native path dispatch")
+                assert(loco._ac_navigation == nil)
+            else
+                assert(loco.FindPath ~= native_locomotor.FindPath)
+            end
+        end
+        for _, level in ipairs({ 0, 1 }) do
+            local host = prefab.fn()
+            host.components.ac_worker:OnDropped()
+            assert(host.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, level))
+            check_navigation(host)
+            local restored = prefab.fn()
+            restored.components.ac_worker:OnLoad(host.components.ac_worker:OnSave())
+            restored.components.ac_upgradable:OnLoad(host.components.ac_upgradable:OnSave())
+            check_navigation(restored)
+            assert(restored.Physics:GetRadius() == .25)
+            assert(restored.components.ac_worker.radius == (level == 1 and 20 or 12))
+        end
+        require = native_require
+    end
 end
 
 function scenarios.upgrade_recipe_and_action_selection()

@@ -4,6 +4,7 @@ local G = GLOBAL
 local Upgrades = require("ac_upgrades")
 G.TUNING.AUTOMATIC_COLLECTOR = {
     radius = GetModConfigData("work_radius") or 12,
+    new_navigation = GetModConfigData("new_navigation") ~= false,
     matching_only = GetModConfigData("matching_only") == true,
     pick_plants = GetModConfigData("pick_plants") ~= false,
     hammer_giants = GetModConfigData("hammer_giants") ~= false,
@@ -47,7 +48,7 @@ strings.RECIPE_DESC.AUTOMATIC_COLLECTOR = "逐个收集，凑组运送。"
 strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR = {
     GENERIC = "它有自己的工作节奏。",
     PAUSED = "让它歇一会儿吧。",
-    BLOCKED = "它需要一个能接收货物的箱子。",
+    BLOCKED = "这批货暂时运不出去。",
     HELD = "放在地上，就能开始工作。",
 }
 

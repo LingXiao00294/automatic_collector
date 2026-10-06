@@ -118,10 +118,11 @@ function M.CanReceive(worker, target, item, requiredcount)
         and container:CanAcceptCount(item, count) >= count
 end
 
-function M.FindContainer(worker, item, requiredcount)
+function M.FindContainer(worker, item, requiredcount, allow_waiting)
     local best, bestscore
     for _, target in ipairs(M.GetContainers(worker)) do
-        if not worker:IsCoolingDown(target) and M.CanReceive(worker, target, item, requiredcount) then
+        if (not worker:IsCoolingDown(target) or (allow_waiting and worker:IsWaitingForRoute(target)))
+            and M.CanReceive(worker, target, item, requiredcount) then
             local container = target.components.container
             local matching = container:Has(item.prefab, 1)
             local score = (matching and 0 or 100000) + worker.inst:GetDistanceSqToInst(target)

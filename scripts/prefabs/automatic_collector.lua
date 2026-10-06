@@ -42,7 +42,7 @@ local function fn()
     inst.Light:SetRadius(0)
     inst.Light:Enable(false)
 
-    MakeCharacterPhysics(inst, 20, .35)
+    MakeCharacterPhysics(inst, 20, .25)
     inst.Transform:SetFourFaced()
     inst.AnimState:SetBank("automatic_collector")
     inst.AnimState:SetBuild("automatic_collector")
@@ -92,6 +92,9 @@ local function fn()
     inst.components.locomotor:SetTriggersCreep(false)
     inst.components.locomotor.pathcaps = { ignorecreep = true, allowocean = false }
     inst:AddComponent("ac_worker")
+    if TUNING.AUTOMATIC_COLLECTOR.new_navigation ~= false then
+        require("ac_navigation").Attach(inst)
+    end
     inst:AddComponent("ac_upgradable")
     inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
     inst:ListenForEvent("ac_harvestenabledchanged", Sounds.OnEnabledChanged)

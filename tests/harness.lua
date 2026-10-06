@@ -336,6 +336,8 @@ function scenarios.watchdog_idle_and_lifecycle()
     end
     assert(scans == before)
     item("twigs",1)
+    advance_periodic(w.inst,.499)
+    assert(w:GetNextAction() == nil and scans == before, "Idle scans must wait the full .5 seconds")
     advance_periodic(w.inst,.5)
     local action = w:GetNextAction()
     assert(action ~= nil and idle.cancelled and w.task.period == .1)
@@ -1082,9 +1084,9 @@ function scenarios.pickup_uses_winona_arrival_distance()
 end
 
 function scenarios.two_workers_pickup_overlapping_drops()
-    -- Two radius .35 collectors can touch on either side of one drop point.
+    -- Two radius .25 collectors can touch on either side of one drop point.
     -- Both must reach their pickup state without occupying the exact same point.
-    local a, b = worker(-.35), worker(.35)
+    local a, b = worker(-.25), worker(.25)
     local c = chest(5)
     local first, second = item("twigs",0), item("flint",0)
     local left, right = a:GetNextAction(), b:GetNextAction()
