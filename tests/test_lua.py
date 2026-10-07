@@ -182,6 +182,7 @@ def test_lua_51_syntax():
         "upgrade_work_timing_and_walk_reset",
         "upgrade_recipe_and_action_selection",
         "upgrade_prefab_client_and_host",
+        "upgrade_kit_preserves_stack_mod_settings",
         "collector_mouse_pickup",
     ],
 )

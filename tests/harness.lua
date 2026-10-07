@@ -25,7 +25,7 @@ end
 ACTIONS.PICKUP.priority = 1
 ACTIONS.PICKUP.mount_valid = true
 ACTIONS.PICKUP.extra_arrive_dist = function() return .25 end
-TUNING = { AUTOMATIC_COLLECTOR = { radius = 12, walkspeed = 3, pick_plants = true,
+TUNING = { STACK_SIZE_MEDITEM = 20, AUTOMATIC_COLLECTOR = { radius = 12, walkspeed = 3, pick_plants = true,
     hammer_giants = true, matching_only = false, action_timeout = 20, retry_delay = 10 } }
 local entities = {}
 local scans = 0

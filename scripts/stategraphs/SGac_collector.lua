@@ -84,10 +84,18 @@ local function WalkExit(inst)
     -- non-walk state's onenter stops it; lifecycle callbacks also stop it.
     inst.AnimState:SetDeltaTimeMultiplier(1)
 end
+local function WalkStopUpdate(inst)
+    -- Navigation may resume before walk_pst ends. Native OnLocomote only starts
+    -- walking from idle, so do not make a resolved pause wait for that animation.
+    if inst.components.locomotor:WantsToMoveForward() then
+        inst.sg:GoToState("walk_start")
+    end
+end
 CommonStates.AddWalkStates(states, nil,
     { startwalk = "walk_pre", walk = "walk_loop", stopwalk = "walk_pst" }, false, false, {
         startonenter = WalkEnter, walkonenter = WalkEnter, endonenter = WalkEnter,
         startonexit = WalkExit, walkonexit = WalkExit, endonexit = WalkExit,
+        endonupdate = WalkStopUpdate,
     })
 
 return StateGraph("ac_collector", states, {

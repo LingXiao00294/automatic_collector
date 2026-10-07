@@ -40,6 +40,13 @@ SCENARIOS = [
     "navigation_shore_pickup",
     "navigation_shore_pickup_already_near",
     "navigation_shore_pickup_tangent",
+    "navigation_shore_overhang_pickup_delivery",
+    "navigation_shore_overhang_approach_from_land",
+    "navigation_shore_overhang_home",
+    "navigation_shore_overhang_water_gap",
+    "navigation_shore_overhang_inland_rejection",
+    "navigation_shore_overhang_refinement",
+    "navigation_shore_overhang_body_clearance",
     "navigation_shore_does_not_cross_water",
     "navigation_grid_arrival_point",
     "navigation_plain_waypoints",
@@ -56,6 +63,9 @@ SCENARIOS = [
     "navigation_refresh_obstacles_change",
     "navigation_refresh_with_busy_search",
     "navigation_queued_refresh_platform_removed",
+    "navigation_refresh_snapshot_expires",
+    "navigation_refresh_arrival_waits",
+    "navigation_refresh_movement_counts_for_stuck",
 ]
 
 
@@ -175,6 +185,25 @@ def test_navigation_scenario(navigation, scenario):
     navigation.globals().scenarios[scenario]()
 
 
+def test_native_map_overhang_recovery(navigation):
+    with ZipFile(native_bundle()) as archive:
+        source = archive.read("scripts/components/map.lua").decode("utf-8")
+    methods = []
+    for name in ("IsPassableAtPoint", "IsPassableAtPointWithPlatformRadiusBias"):
+        start = source.index(f"function Map:{name}(")
+        boundary = re.search(r"\n(?:local )?function \w", source[start + 1 :])
+        assert boundary is not None, f"Missing map method boundary for {name}"
+        methods.append(source[start : start + 1 + boundary.start()])
+    navigation.execute("local Map = TheWorld.Map\n" + "\n".join(methods))
+    navigation.execute("""
+        function TheWorld.Map:IsAboveGroundAtPoint(x) return x >= 0 end
+        function TheWorld.Map:IsVisualGroundAtPoint(x) return x >= -1.2 end
+        local passable, overhang = TheWorld.Map:IsPassableAtPoint(-.6, 0, -.3, false, true)
+        assert(passable and overhang, "Native Map must identify passable visual land outside its tiles")
+    """)
+    navigation.globals().scenarios.navigation_shore_overhang_pickup_delivery()
+
+
 def test_blocked_routes_skip_terrain_queries(navigation):
     result = navigation.globals().scenarios.navigation_enclosed_cargo_conservation()
     assert result.maximum_ground <= 5000, (
@@ -214,6 +243,8 @@ def test_native_brain_dispatch(navigation, scenario):
         "navigation_native_idle_wakeup",
         "navigation_native_blocked_return_dispatch",
         "navigation_native_queued_search_lifecycle",
+        "navigation_native_transport_continuous",
+        "navigation_native_short_pause_resumes",
     ],
 )
 def test_native_dispatch_lifecycle(navigation, scenario):

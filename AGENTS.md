@@ -46,7 +46,7 @@ pytest 通过 Lupa 执行 LuaJIT；`tests/harness.lua` 提供行为场景，`tes
 
 默认不创建提交，不直接在 `main`/`master` 开发。新分支默认使用 `codex/<主题>`；用户要求提交时沿用 Conventional Commits，例如 `fix: preserve partial pickup stacks`，仅纳入任务相关文件。
 
-PR 描述应说明问题、最终行为、验证结果和未验证范围，关联已有问题；美术变更附预览并注明是否游戏截图。功能、配置或 API 变化同步更新 README 和相关文档；模组版本变更时同步工具项目版本，发行目录固定为 `publish/`。
+PR 描述应说明问题、最终行为、验证结果，关联已有问题；美术变更附预览并注明是否游戏截图。功能、配置或 API 变化同步更新 README 和相关文档；模组版本变更时同步工具项目版本，发行目录固定为 `publish/`。
 
 ## 资源与协作约束
 
