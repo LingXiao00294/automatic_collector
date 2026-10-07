@@ -650,7 +650,12 @@ local function register_modmain(config)
     AddMinimapAtlas = function() end
     RegisterInventoryItemAtlas = function() end
     AddSimPostInit = function() end
-    AddRecipe2 = function(name, ingredients, tech) recipes[name] = { ingredients = ingredients, tech = tech } end
+    AddRecipe2 = function(name, ingredients, tech, config, filters)
+        recipes[name] = { ingredients = ingredients, tech = tech, config = config, filters = filters }
+        if NativeCraftingRegistration ~= nil then
+            return NativeCraftingRegistration.AddRecipe2(name, ingredients, tech, config, filters)
+        end
+    end
     AddAction = function(id, _, fn)
         local a = { id = id, fn = fn } ACTIONS[id] = a return a
     end
@@ -659,6 +664,8 @@ local function register_modmain(config)
     assert(loadfile(TEST_ROOT .. "/modmain.lua"))()
     return callbacks, recipes, handlers
 end
+
+upgrade_contract.register_modmain = register_modmain
 
 function scenarios.navigation_configuration()
     assert(loadfile(TEST_ROOT .. "/modinfo.lua"))()

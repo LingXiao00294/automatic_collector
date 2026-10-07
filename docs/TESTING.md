@@ -2,6 +2,13 @@
 
 最新离线验证日期：2026-10-07。历史游戏验证环境为本机 DST 构建号 `747465`、Windows 64 位；0.6.2.1 已收到用户实机反馈：修复启动错误并关闭 `DontStarveLuaJit2` 与“无卡顿加载”后，未再观察到待机长等待。具体范围见下文。
 
+## 制作分类调整为工具（2026-10-07）
+
+- 用户在科学分类与创造模式中找不到物品；原版 `recipes_filter.lua` 确认科学分类键为 `PROTOTYPERS`，之前使用的 `SCIENCE` 不存在，会被 `AddRecipeToFilter` 静默忽略。按用户要求，将拾荒机及升级套件的显式分类统一为 `TOOLS`（工具），移除科学和建筑注册；原版自动添加的模组物品入口保留，材料和炼金引擎解锁要求不变。
+- 新增本机原版制作分类契约检查：读取真实分类表及 `AddRecipe2` / `AddRecipeToFilter`，执行当前 `modmain.lua`，确认两个配方进入工具与模组物品分类，并且不进入科学或建筑分类。不启动游戏，不分发原版脚本；没有本机游戏时跳过该项。
+- `uv run --locked pytest -q --basetemp .cache/pytest-crafting-tools-20261007 --tb=short`：**338 项通过**，原版分类检查实际执行。`uv run --locked ruff check tests/test_lua.py`、`ruff format --check tests/test_lua.py`、`ty check tests/test_lua.py` 及 `git diff --check` 通过。
+- README、开发者指南及技术报告同步；发行脚本更新 `publish/` 的 **36 个文件**，白名单及与源码逐字节比对通过。版本保持 0.7.3，`modinfo.lua` description 未修改。未启动客户端或专用服务器；替换游戏模组文件并重新载入世界后，需实机检查两种配方在工具分类中的显示及制作。
+
 ## v0.7.3 版本与发行（2026-10-07）
 
 - 模组、工具项目、锁文件、README、技术报告和音效说明同步为 0.7.3。按用户要求在 `modinfo.lua` description 的 changelog 新增简述：“区分拾荒机和采集车的代码名，兼容旧存档”；功能介绍和历史更新内容保留。

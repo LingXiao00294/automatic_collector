@@ -191,6 +191,51 @@ def test_scenario(lua, scenario):
     lua.globals().scenarios[scenario]()
 
 
+def test_native_collector_crafting_filters(lua):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native crafting filter check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        filter_source = scripts.read("scripts/recipes_filter.lua").decode("utf-8")
+        modutil_source = scripts.read("scripts/modutil.lua").decode("utf-8")
+    lua.execute("""
+        table.invert = function(values)
+            local result = {}
+            for index, value in ipairs(values) do result[value] = index end
+            return result
+        end
+        env = {}
+        NativeCraftingRegistration = env
+        initprint = function() end
+        package.loaded.recipe = true
+        Recipe2 = function(name, ingredients, tech, config)
+            return { name = name, ingredients = ingredients, tech = tech, config = config,
+                SetModRPCID = function() end }
+        end
+    """)
+    lua.execute(filter_source, name="@native/recipes_filter.lua")
+    for method in ("AddRecipeToFilter", "AddRecipe2"):
+        start = modutil_source.index(f"env.{method} = function(")
+        end = modutil_source.index("\n\tend", start) + len("\n\tend")
+        lua.execute(modutil_source[start:end], name=f"@native/modutil/{method}.lua")
+    lua.execute("""
+        upgrade_contract.register_modmain()
+        for _, recipe in ipairs({ "automatic_collector", "ac_upgrade_kit" }) do
+            for _, filter_name in ipairs({ "TOOLS", "MODS" }) do
+                local filter = CRAFTING_FILTERS[filter_name]
+                local index = filter.default_sort_values[recipe]
+                assert(index ~= nil and filter.recipes[index] == recipe)
+            end
+            for _, filter_name in ipairs({ "PROTOTYPERS", "STRUCTURES" }) do
+                assert(CRAFTING_FILTERS[filter_name].default_sort_values[recipe] == nil)
+            end
+        end
+    """)
+
+
 def test_native_collector_prefab_save_load(lua):
     game_root = Path(
         os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")

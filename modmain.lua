@@ -59,14 +59,14 @@ AddRecipe2("automatic_collector", {
 }, G.TECH.SCIENCE_TWO, {
     atlas = "images/inventoryimages/automatic_collector.xml",
     image = "automatic_collector.tex",
-}, { "SCIENCE", "STRUCTURES" })
+}, { "TOOLS" })
 
 AddRecipe2("ac_upgrade_kit", {
     G.Ingredient("thulecite", 10), G.Ingredient("wagpunk_bits", 3), G.Ingredient("moonrocknugget", 5),
 }, G.TECH.SCIENCE_TWO, {
     atlas = "images/inventoryimages/ac_upgrade_kit.xml",
     image = "ac_upgrade_kit.tex",
-}, { "SCIENCE", "STRUCTURES" })
+}, { "TOOLS" })
 
 -- Mouse-only scene action. Native action-button scans require canbepickedup.
 local pickup = AddAction("AC_PICKUP", "捡起", function(act)
