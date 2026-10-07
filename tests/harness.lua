@@ -898,6 +898,76 @@ function scenarios.destination_limits_merge()
     assert(c.components.container.stored.twigs == 5 and w:GetNextAction() == nil)
 end
 
+function scenarios.delivery_capacity_stops_when_sufficient()
+    local w = worker()
+    local cargo = item("twigs", 0, nil, 40)
+    cargo.skinname = "test_skin"
+    local queries = 0
+    local first = chest(5)
+    local preferred = chest(1, { twigs = true })
+    for _ = 1, 98 do chest(6) end
+    for _, target in ipairs(Targets.GetContainers(w)) do
+        local original = target.components.container.CanAcceptCount
+        target.components.container.CanAcceptCount = function(self, queried, maxcount)
+            assert(queried == cargo and queried.skinname == "test_skin" and maxcount == 40)
+            queries = queries + 1
+            return original(self, queried, maxcount)
+        end
+    end
+    assert(Targets.DeliveryCapacity(w, cargo, 40) == 40 and queries == 1)
+    assert(cargo.components.stackable:StackSize() == 40 and cargo:IsValid())
+    assert(Targets.FindContainer(w, cargo, 40) == preferred and preferred ~= first,
+        "Capacity short-circuiting must not change receiver preference")
+end
+
+function scenarios.delivery_capacity_finds_best_partial_receiver()
+    local w = worker()
+    local cargo = item("twigs", 0, nil, 10)
+    local queries = 0
+    for _, capacity in ipairs({ 3, 7, 5 }) do
+        local target = chest(5, nil, capacity)
+        target.components.container.CanAcceptCount = function(self, queried, maxcount)
+            assert(queried == cargo and maxcount == 10)
+            queries = queries + 1
+            return math.min(self.capacity, maxcount)
+        end
+    end
+    assert(Targets.DeliveryCapacity(w, cargo, 10) == 7 and queries == 3,
+        "A cargo group needs one receiver; capacities must not be added together")
+    assert(cargo.components.stackable:StackSize() == 10)
+end
+
+function scenarios.delivery_capacity_respects_filters_and_cooldowns()
+    local w = worker()
+    w.config.matching_only = true
+    local cargo = item("twigs", 0, nil, 10)
+    cargo.skinname = "filtered_skin"
+    local unmatched = chest(1)
+    local cooling = chest(2, { twigs = true })
+    w.cooldowns[cooling] = GetTime() + 10
+    local restricted = chest(3, { twigs = true })
+    restricted.components.container.restricted = true
+    local excluded = chest(4, { twigs = true })
+    excluded:AddTag("ac_no_delivery")
+    for _, target in ipairs({ unmatched, cooling, restricted, excluded }) do
+        target.components.container.CanAcceptCount = function() error("Ineligible receiver queried") end
+    end
+    local queries = 0
+    for _, capacity in ipairs({ 0, 3, 40 }) do
+        local target = chest(5, { twigs = true }, capacity)
+        target.components.container.CanAcceptCount = function(self, queried, maxcount)
+            assert(queried == cargo and queried.skinname == "filtered_skin" and maxcount == 10)
+            queries = queries + 1
+            return math.min(self.capacity, maxcount)
+        end
+    end
+    chest(6, { twigs = true }).components.container.CanAcceptCount = function()
+        error("Receivers after sufficient capacity must not be queried")
+    end
+    assert(Targets.DeliveryCapacity(w, cargo, 10) == 10 and queries == 3)
+    assert(cargo.components.stackable:StackSize() == 10)
+end
+
 function scenarios.capacity_changes_at_impact()
     local w = worker() local c = chest(5)
     local cargo = item("twigs",0,nil,4) w.inst.components.inventory:GiveItem(cargo)

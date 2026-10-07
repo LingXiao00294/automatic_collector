@@ -58,7 +58,6 @@ local function fn(advanced)
     inst._ac_enabled = net_bool(inst.GUID, "ac.enabled")
     inst._ac_harvest_enabled = net_bool(inst.GUID, "ac.harvest_enabled")
     inst._ac_mk2 = net_bool(inst.GUID, "ac.mk2", "ac_mk2dirty")
-    inst.displaynamefn = Upgrades.DisplayName
     inst:ListenForEvent("ac_mk2dirty", Upgrades.RefreshVisual)
     inst._ac_blocked = net_bool(inst.GUID, "ac.blocked")
     inst._ac_home_valid = net_bool(inst.GUID, "ac.home_valid")

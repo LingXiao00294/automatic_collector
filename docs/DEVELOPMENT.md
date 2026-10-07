@@ -47,7 +47,7 @@ uv run --locked ty check tools tests
 
 升级套件堆叠回归包含不依赖游戏安装的组件初始化设置保留场景，以及 `tests/test_stackable.py` 的原版契约检查。后者从本机 `scripts.zip` 只读加载原版 Class、`stackable` 与 `stackable_replica`，执行真实套件 prefab，覆盖默认档位、统一上限 64、各档位分别修改、组件初始化回调与无限堆叠，并检查主机/客户端初始化、拆分、存档恢复及数量守恒。可通过 `DST_GAME_ROOT` 指定安装目录；未安装游戏时跳过原版检查，不启动游戏或分发游戏源码。
 
-`tests/test_lua.py` 另从本机 `scripts.zip` 只读加载原版实体命名、显示名、持久化与 `SpawnSaveRecord` 方法，验证两款车直接生成后的独立代码、存档重载、旧采集车代码迁移及撤销等级；实体与网络仍使用离线夹具，不模拟真实联网。安装目录沿用 `DST_GAME_ROOT`，缺少游戏时跳过该项。
+`tests/test_lua.py` 另从本机 `scripts.zip` 只读加载原版实体命名、显示名、持久化与 `SpawnSaveRecord` 方法，验证两款车直接生成后的独立代码、存档重载、旧采集车代码迁移及撤销等级。命名检查加载原版 Class、`named` 和 `named_replica`，覆盖主机/客户端自定义名、作者过滤、名称回调与 `nameoverride` 优先级、与默认名相同的自定义名及清除命名后的等级切换。容量场景检查满额后的查询次数、单箱最大可接收量、过滤与冷却，不将调用次数换算为游戏帧率。实体与网络仍使用离线夹具，不模拟真实联网。安装目录沿用 `DST_GAME_ROOT`，缺少游戏时跳过原版检查。
 
 制作分类回归同样从本机读取原版 `recipes_filter.lua` 和 `modutil` 的 `AddRecipe2` / `AddRecipeToFilter`，执行真实 `modmain.lua`，检查拾荒机与升级套件进入工具分类及原版自动添加的模组物品入口，且不进入科学或建筑分类。该项只验证分类注册，不渲染游戏制作界面；缺少游戏时跳过。
 

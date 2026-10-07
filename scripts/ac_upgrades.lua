@@ -13,6 +13,15 @@ end
 function Upgrades.RefreshVisual(inst)
     local advanced = Upgrades.IsAdvanced(inst)
     local name = advanced and Upgrades.ADVANCED_PREFAB or Upgrades.BASE_PREFAB
+    local previous_name = inst.prefab ~= nil and STRINGS.NAMES[string.upper(inst.prefab)] or nil
+    local named = inst.replica ~= nil and inst.replica.named or nil
+    -- Native named may retain its author after clearing the name.
+    local custom_name = named ~= nil and named._name:value() ~= ""
+        or named == nil and inst.name_author_netid ~= nil
+    -- Refresh only the native default; named input can equal a default name.
+    if not custom_name and (inst.name == nil or inst.name == previous_name) then
+        inst.name = STRINGS.NAMES[string.upper(name)]
+    end
     -- Keep the Lua identity, engine spawn identity and save records in sync.
     if inst.prefab ~= name then inst:SetPrefabName(name) end
     -- Preserve native character masks, mass and capsule height on every peer.
@@ -20,11 +29,6 @@ function Upgrades.RefreshVisual(inst)
     inst.AnimState:SetBank(name)
     inst.AnimState:SetBuild(name)
     inst.MiniMapEntity:SetIcon(name .. ".tex")
-end
-
-function Upgrades.DisplayName(inst)
-    local name = Upgrades.IsAdvanced(inst) and Upgrades.ADVANCED_PREFAB or Upgrades.BASE_PREFAB
-    return STRINGS.NAMES[string.upper(name)]
 end
 
 function Upgrades.Apply(inst, level)

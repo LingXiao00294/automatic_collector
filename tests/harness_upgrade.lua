@@ -56,7 +56,7 @@ function scenarios.upgrade_single_and_stack()
         assert(w.inst.bank == "automatic_collector_mk2" and w.inst.build == w.inst.bank)
         assert(w.inst.mapicon == "automatic_collector_mk2.tex")
         assert(w.inst.components.inventoryitem.imagename == "automatic_collector_mk2")
-        assert(Upgrades.DisplayName(w.inst) == "采集车")
+        assert(w.inst.name == "采集车")
         if count == 1 then assert(not kit:IsValid()) else
             assert(kit:IsValid() and kit.components.stackable:StackSize() == count - 1)
             assert(kit.components.inventoryitem.owner == player and kit.skinname == "test_skin")
@@ -420,7 +420,7 @@ function scenarios.collector_distinct_prefabs()
     assert(collector.components.ac_worker:IsHarvestEnabled())
     assert(collector.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 1)
     assert(collector.components.locomotor.walkspeed == 6 and collector.components.ac_worker.radius == 20)
-    assert(ordinary:displaynamefn() == "拾荒机" and collector:displaynamefn() == "采集车")
+    assert(ordinary.name == "拾荒机" and collector.name == "采集车")
     assert(ordinary:HasTag("automatic_collector") and collector:HasTag("automatic_collector"))
     local cargo = H.item("twigs", 0, nil, 7)
     ordinary.components.inventory:GiveItem(cargo)
@@ -431,15 +431,15 @@ function scenarios.collector_distinct_prefabs()
     assert(ordinary.components.ac_worker.farm_count == 3 and not ordinary._ac_harvest_enabled:value())
     assert(collector.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
     assert(collector.prefab == base.name and collector.native_prefab == base.name)
-    assert(collector:displaynamefn() == "拾荒机" and not collector.components.ac_worker:IsHarvestEnabled())
+    assert(collector.name == "拾荒机" and not collector.components.ac_worker:IsHarvestEnabled())
     TheWorld.ismastersim = false
     set_seed(true)
     local client = advanced.fn()
     assert(client.prefab == advanced.name and client.components.ac_worker == nil)
-    assert(client:displaynamefn() == "采集车")
+    assert(client.name == "采集车")
     client._ac_mk2:set(false)
     assert(client.prefab == base.name and client.native_prefab == base.name)
-    assert(client:displaynamefn() == "拾荒机")
+    assert(client.name == "拾荒机")
 end
 
 -- Uses the installed game's actual EntityScript and SpawnSaveRecord methods.
@@ -485,6 +485,91 @@ function scenarios.collector_prefab_native_save_load()
     end
 end
 
+function scenarios.collector_native_display_names(ismastersim)
+    local base, set_seed, _, advanced = prefab_runtime()
+    TheWorld.ismastersim = ismastersim
+    STRINGS.NAMES.TEST_NAME_OVERRIDE = "第三方显示名"
+    TEXT_FILTER_CTX_CHAT = "chat"
+    local filtered = 0
+    ApplyLocalWordFilter = function(name, context, author)
+        assert(context == TEXT_FILTER_CTX_CHAT and author == "net:author")
+        filtered = filtered + 1
+        return "已过滤:" .. name
+    end
+    TheNet = { GetNetIdForUser = function(_, author) return "net:" .. author end }
+    for _, prefab in ipairs({ base, advanced }) do
+        set_seed(prefab == advanced)
+        local inst = prefab.fn()
+        local function change_level(advanced_level)
+            if ismastersim then
+                assert(inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, advanced_level and 1 or 0))
+            else
+                inst._ac_mk2:set(advanced_level)
+            end
+        end
+        local function check_name(expected)
+            assert(inst:GetBasicDisplayName() == expected)
+        end
+        check_name(prefab == base and "拾荒机" or "采集车")
+        inst.name = "仓库一号"
+        check_name("仓库一号")
+        change_level(true) check_name("仓库一号")
+        change_level(false) check_name("仓库一号")
+        inst.displaynamefn = function() return "第三方名称回调" end
+        change_level(true) check_name("第三方名称回调")
+        inst.displaynamefn = nil
+        inst.nameoverride = "test_name_override"
+        check_name("第三方显示名")
+        change_level(true) check_name("第三方显示名")
+        inst.nameoverride = nil
+        check_name("仓库一号")
+        inst.name, inst.name_author_netid = "采集车", "net:author"
+        check_name("已过滤:采集车")
+        change_level(false) check_name("已过滤:采集车")
+        inst.nameoverride = "test_name_override"
+        local before = filtered
+        check_name("第三方显示名")
+        assert(filtered == before, "Native nameoverride priority must be preserved")
+        inst.nameoverride, inst.name_author_netid = nil, nil
+
+        -- Use the actual named component/replica, including names equal to defaults.
+        net_string = function(_, _, dirty)
+            local value = ""
+            return { value = function() return value end, set = function(_, new_value)
+                value = new_value
+                inst:PushEvent(dirty)
+            end }
+        end
+        inst.replica = { named = NativeNamedReplica(inst) }
+        if ismastersim then inst.components.named = NativeNamed(inst) end
+        local function set_name(name, author)
+            if ismastersim then inst.components.named:SetName(name, author)
+            else
+                inst.replica.named._author_netid:set(author ~= nil and "net:" .. author or "")
+                inst.replica.named._name:set(name or "")
+            end
+        end
+        for _, name in ipairs({ "拾荒机", "采集车", "命名的小车" }) do
+            set_name(name)
+            change_level(true) check_name(name)
+            change_level(false) check_name(name)
+        end
+        set_name("拾荒机", "author")
+        change_level(true) check_name("已过滤:拾荒机")
+        change_level(false) check_name("已过滤:拾荒机")
+        set_name(nil)
+        check_name(ismastersim and "已过滤:拾荒机" or "拾荒机")
+        change_level(true) check_name(ismastersim and "已过滤:采集车" or "采集车")
+        change_level(false) check_name(ismastersim and "已过滤:拾荒机" or "拾荒机")
+        set_name("无作者名称")
+        set_name(nil)
+        check_name("拾荒机")
+        change_level(true) check_name("采集车")
+        change_level(false) check_name("拾荒机")
+    end
+    assert(filtered == (ismastersim and 14 or 8))
+end
+
 function scenarios.upgrade_prefab_client_and_host()
     local prefab, set_seed = prefab_runtime()
     local declared = {}
@@ -493,14 +578,14 @@ function scenarios.upgrade_prefab_client_and_host()
     TheWorld.ismastersim = false
     local client = prefab.fn()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
-    assert(client.prefab == "automatic_collector" and client:displaynamefn() == "拾荒机")
+    assert(client.prefab == "automatic_collector" and client.name == "拾荒机")
     assert(client.Physics:GetRadius() == .25)
     assert(client._ac_harvest_enabled:value())
     client._ac_mk2:set(true)
     assert(client.prefab == "automatic_collector_mk2" and client.native_prefab == client.prefab)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
     assert(client.Physics:GetRadius() == .25)
-    assert(client:displaynamefn() == "采集车")
+    assert(client.name == "采集车")
     set_seed(true)
     local late = prefab.fn()
     assert(late.prefab == "automatic_collector_mk2")
@@ -608,7 +693,7 @@ function scenarios.upgrade_load_idempotent_and_relocate()
     restored:OnPickup(nil) restored:OnDropped()
     assert(Upgrades.IsAdvanced(restored.inst) and restored.inst.components.locomotor.walkspeed == 6)
     assert(restored.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
-    assert(restored.inst.prefab == "automatic_collector" and Upgrades.DisplayName(restored.inst) == "拾荒机")
+    assert(restored.inst.prefab == "automatic_collector" and restored.inst.name == "拾荒机")
     assert(restored.inst.components.locomotor.walkspeed == 3 and restored.inst.bank == "automatic_collector")
     assert(restored.inst.Physics:GetRadius() == .25)
     local legacy = prepare() legacy.inst.components.ac_upgradable:OnLoad(nil)

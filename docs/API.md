@@ -8,6 +8,10 @@
 
 两款车分别使用 `automatic_collector`（拾荒机）和 `automatic_collector_mk2`（采集车）prefab，由 `prefabs/automatic_collector.lua` 同时注册，共用组件与生命周期。`SpawnPrefab("automatic_collector_mk2")` 直接生成内置底盘等级 1 的采集车；`ac_upgrades.BASE_PREFAB` / `ADVANCED_PREFAB` 提供对应名称常量。升级保留原实体，通过原版 `SetPrefabName` 同步 Lua 与引擎身份，使新存档记录正确的 prefab；撤销等级或安装失败回滚时恢复普通车代码。旧存档仍可从 `automatic_collector` 加载，按原升级等级自动迁移为采集车代码。
 
+0.7.4 恢复原版 `GetBasicDisplayName` 的优先级：扩展的 `displaynamefn`、`nameoverride`、带作者信息的过滤名称、`inst.name`。等级刷新仅更新未被自定义的默认名称；`named` 的非空名称即使恰好等于“拾荒机”或“采集车”，也会保留。需使用这两个默认字符串作为固定自定义名时，使用原版 `named` 组件，而不是仅赋值 `inst.name`。原版 `named` 负责自定义名称的网络同步和持久化。
+
+存档兼容方向为旧版升级至新版。0.7.3 及以后写入的采集车记录使用 `automatic_collector_mk2`，0.7.2 及更早版本未注册此代码，不能恢复这些记录；降回旧模组应使用升级前的世界备份。
+
 `_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端据此同步 prefab 名称并刷新 bank、build、地图图标、显示名与碰撞尺寸；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。两款车继续共用 `automatic_collector` 标签；查找所有小车时使用该标签，针对单款车时比较 `inst.prefab`。需要初始化两款车的扩展应分别注册两个 prefab 的 `AddPrefabPostInit`。
 
 两款小车的物理胶囊统一为半径 .25（直径 .5），胶囊高度参数为 1；质量、碰撞组、掩码与美术缩放保持原值。新建、服务端升级/读档及客户端 dirty/晚加入刷新均应用该尺寸，撤销等级或安装失败回滚也保持此尺寸。导航直接读取实际 Physics 半径。

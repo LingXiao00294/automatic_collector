@@ -90,6 +90,9 @@ def test_lua_51_syntax():
         "full_stack_delivers",
         "partial_stack_pickup",
         "destination_limits_merge",
+        "delivery_capacity_stops_when_sufficient",
+        "delivery_capacity_finds_best_partial_receiver",
+        "delivery_capacity_respects_filters_and_cooldowns",
         "capacity_changes_at_impact",
         "skin_and_mod_merge_rules",
         "no_active_overflow",
@@ -236,7 +239,8 @@ def test_native_collector_crafting_filters(lua):
     """)
 
 
-def test_native_collector_prefab_save_load(lua):
+@pytest.fixture
+def native_collector(lua):
     game_root = Path(
         os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
     )
@@ -250,6 +254,10 @@ def test_native_collector_prefab_save_load(lua):
         spawn_source = (
             scripts.read("scripts/mainfunctions.lua").decode("utf-8").replace("\r\n", "\n")
         )
+        named_sources = {
+            name: scripts.read(f"scripts/{name}.lua").decode("utf-8")
+            for name in ("class", "components/named", "components/named_replica")
+        }
     lua.execute("""
         EntityScript = {}
         IsTableEmpty = function(values) return next(values) == nil end
@@ -272,7 +280,23 @@ def test_native_collector_prefab_save_load(lua):
     save_start = spawn_source.index("function SpawnSaveRecord(", start)
     end = spawn_source.index("\nend", save_start) + len("\nend")
     lua.execute(spawn_source[start:end], name="@native/mainfunctions/SpawnSaveRecord.lua")
-    lua.globals().scenarios.collector_prefab_native_save_load()
+    lua.execute(named_sources["class"], name="@native/class.lua")
+    lua.globals().NativeNamed = lua.execute(
+        named_sources["components/named"], name="@native/components/named.lua"
+    )
+    lua.globals().NativeNamedReplica = lua.execute(
+        named_sources["components/named_replica"], name="@native/components/named_replica.lua"
+    )
+    return lua
+
+
+def test_native_collector_prefab_save_load(native_collector):
+    native_collector.globals().scenarios.collector_prefab_native_save_load()
+
+
+@pytest.mark.parametrize("ismastersim", [False, True], ids=["client", "host"])
+def test_native_collector_display_names(native_collector, ismastersim):
+    native_collector.globals().scenarios.collector_native_display_names(ismastersim)
 
 
 @pytest.mark.parametrize("ismastersim", [False, True])
