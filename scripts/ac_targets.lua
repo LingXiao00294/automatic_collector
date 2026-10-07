@@ -142,6 +142,7 @@ function M.DeliveryCapacity(worker, item, maxcount)
             local container = target.components.container
             if not worker.config.matching_only or container:Has(item.prefab, 1) then
                 capacity = math.max(capacity, container:CanAcceptCount(item, maxcount))
+                if capacity >= maxcount then return maxcount end
             end
         end
     end

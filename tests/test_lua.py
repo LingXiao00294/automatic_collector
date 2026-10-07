@@ -90,6 +90,9 @@ def test_lua_51_syntax():
         "full_stack_delivers",
         "partial_stack_pickup",
         "destination_limits_merge",
+        "delivery_capacity_stops_when_sufficient",
+        "delivery_capacity_finds_best_partial_receiver",
+        "delivery_capacity_respects_filters_and_cooldowns",
         "capacity_changes_at_impact",
         "skin_and_mod_merge_rules",
         "no_active_overflow",
@@ -181,6 +184,7 @@ def test_lua_51_syntax():
         "upgrade_load_idempotent_and_relocate",
         "upgrade_work_timing_and_walk_reset",
         "upgrade_recipe_and_action_selection",
+        "collector_distinct_prefabs",
         "upgrade_prefab_client_and_host",
         "upgrade_kit_preserves_stack_mod_settings",
         "collector_mouse_pickup",
@@ -188,6 +192,111 @@ def test_lua_51_syntax():
 )
 def test_scenario(lua, scenario):
     lua.globals().scenarios[scenario]()
+
+
+def test_native_collector_crafting_filters(lua):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native crafting filter check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        filter_source = scripts.read("scripts/recipes_filter.lua").decode("utf-8")
+        modutil_source = scripts.read("scripts/modutil.lua").decode("utf-8")
+    lua.execute("""
+        table.invert = function(values)
+            local result = {}
+            for index, value in ipairs(values) do result[value] = index end
+            return result
+        end
+        env = {}
+        NativeCraftingRegistration = env
+        initprint = function() end
+        package.loaded.recipe = true
+        Recipe2 = function(name, ingredients, tech, config)
+            return { name = name, ingredients = ingredients, tech = tech, config = config,
+                SetModRPCID = function() end }
+        end
+    """)
+    lua.execute(filter_source, name="@native/recipes_filter.lua")
+    for method in ("AddRecipeToFilter", "AddRecipe2"):
+        start = modutil_source.index(f"env.{method} = function(")
+        end = modutil_source.index("\n\tend", start) + len("\n\tend")
+        lua.execute(modutil_source[start:end], name=f"@native/modutil/{method}.lua")
+    lua.execute("""
+        upgrade_contract.register_modmain()
+        for _, recipe in ipairs({ "automatic_collector", "ac_upgrade_kit" }) do
+            for _, filter_name in ipairs({ "TOOLS", "MODS" }) do
+                local filter = CRAFTING_FILTERS[filter_name]
+                local index = filter.default_sort_values[recipe]
+                assert(index ~= nil and filter.recipes[index] == recipe)
+            end
+            for _, filter_name in ipairs({ "PROTOTYPERS", "STRUCTURES" }) do
+                assert(CRAFTING_FILTERS[filter_name].default_sort_values[recipe] == nil)
+            end
+        end
+    """)
+
+
+@pytest.fixture
+def native_collector(lua):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native prefab save/load contract check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        entity_source = (
+            scripts.read("scripts/entityscript.lua").decode("utf-8").replace("\r\n", "\n")
+        )
+        spawn_source = (
+            scripts.read("scripts/mainfunctions.lua").decode("utf-8").replace("\r\n", "\n")
+        )
+        named_sources = {
+            name: scripts.read(f"scripts/{name}.lua").decode("utf-8")
+            for name in ("class", "components/named", "components/named_replica")
+        }
+    lua.execute("""
+        EntityScript = {}
+        IsTableEmpty = function(values) return next(values) == nil end
+        isbadnumber = function(value)
+            return value ~= value or value == math.huge or value == -math.huge
+        end
+    """)
+    for method in (
+        "SetPrefabName",
+        "GetBasicDisplayName",
+        "GetSaveRecord",
+        "GetPersistData",
+        "SetPersistData",
+    ):
+        start = entity_source.index(f"function EntityScript:{method}(")
+        end = entity_source.index("\nend", start) + len("\nend")
+        lua.execute(entity_source[start:end], name=f"@native/entityscript/{method}.lua")
+    lua.globals().NativeEntityScript = lua.globals().EntityScript
+    start = spawn_source.index("local function ResolveSaveRecordPosition(")
+    save_start = spawn_source.index("function SpawnSaveRecord(", start)
+    end = spawn_source.index("\nend", save_start) + len("\nend")
+    lua.execute(spawn_source[start:end], name="@native/mainfunctions/SpawnSaveRecord.lua")
+    lua.execute(named_sources["class"], name="@native/class.lua")
+    lua.globals().NativeNamed = lua.execute(
+        named_sources["components/named"], name="@native/components/named.lua"
+    )
+    lua.globals().NativeNamedReplica = lua.execute(
+        named_sources["components/named_replica"], name="@native/components/named_replica.lua"
+    )
+    return lua
+
+
+def test_native_collector_prefab_save_load(native_collector):
+    native_collector.globals().scenarios.collector_prefab_native_save_load()
+
+
+@pytest.mark.parametrize("ismastersim", [False, True], ids=["client", "host"])
+def test_native_collector_display_names(native_collector, ismastersim):
+    native_collector.globals().scenarios.collector_native_display_names(ismastersim)
 
 
 @pytest.mark.parametrize("ismastersim", [False, True])

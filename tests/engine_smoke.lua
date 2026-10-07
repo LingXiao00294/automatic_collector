@@ -104,11 +104,13 @@ AddPrefabPostInit("world", function(world)
                 cargo.components.stackable:SetStackSize(5)
                 collector.components.inventory:GiveItem(cargo)
                 local record = collector:GetSaveRecord()
+                assert(record.prefab == "automatic_collector_mk2", "Upgraded prefab identity lost")
                 assert(record.data ~= nil, "Missing save data")
                 collector:Remove()
                 if cargo:IsValid() then cargo:Remove() end
                 collector = G.SpawnSaveRecord(record)
                 assert(collector ~= nil, "Could not restore collector")
+                assert(collector.prefab == "automatic_collector_mk2", "Restored prefab identity lost")
                 collector.entity:SetCanSleep(false)
                 worker = collector.components.ac_worker
                 assert(not worker.enabled, "Pause flag lost on restore")

@@ -91,9 +91,11 @@ function M.Register(g, modname)
         return false
     end
     api.AddComponentDescriptor("ac_worker", { Describe = M.Describe }, { modname = modname })
-    api.AddPrefabDescriptor("automatic_collector", {
-        OnSelect = M.Select, OnUnselect = M.Unselect,
-    }, { modname = modname })
+    for _, name in ipairs({ Upgrades.BASE_PREFAB, Upgrades.ADVANCED_PREFAB }) do
+        api.AddPrefabDescriptor(name, {
+            OnSelect = M.Select, OnUnselect = M.Unselect,
+        }, { modname = modname })
+    end
     return true
 end
 

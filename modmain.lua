@@ -51,20 +51,22 @@ strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR = {
     BLOCKED = "这批货暂时运不出去。",
     HELD = "放在地上，就能开始工作。",
 }
+strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR_MK2 =
+    strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR
 
 AddRecipe2("automatic_collector", {
     G.Ingredient("boards", 2), G.Ingredient("cutstone", 2), G.Ingredient("gears", 1),
 }, G.TECH.SCIENCE_TWO, {
     atlas = "images/inventoryimages/automatic_collector.xml",
     image = "automatic_collector.tex",
-}, { "SCIENCE", "STRUCTURES" })
+}, { "TOOLS" })
 
 AddRecipe2("ac_upgrade_kit", {
     G.Ingredient("thulecite", 10), G.Ingredient("wagpunk_bits", 3), G.Ingredient("moonrocknugget", 5),
 }, G.TECH.SCIENCE_TWO, {
     atlas = "images/inventoryimages/ac_upgrade_kit.xml",
     image = "ac_upgrade_kit.tex",
-}, { "SCIENCE", "STRUCTURES" })
+}, { "TOOLS" })
 
 -- Mouse-only scene action. Native action-button scans require canbepickedup.
 local pickup = AddAction("AC_PICKUP", "捡起", function(act)

@@ -2,6 +2,34 @@
 
 最新离线验证日期：2026-10-07。历史游戏验证环境为本机 DST 构建号 `747465`、Windows 64 位；0.6.2.1 已收到用户实机反馈：修复启动错误并关闭 `DontStarveLuaJit2` 与“无卡顿加载”后，未再观察到待机长等待。具体范围见下文。
 
+## v0.7.4 审查修复与发行（2026-10-07）
+
+- 修复固定显示名覆盖第三方名称的问题：等级刷新只更新默认名称，原版 `GetBasicDisplayName` 继续处理名称回调、`nameoverride`、作者过滤及实体名称。主机/客户端检查加载本机原版 Class、`named` 与 `named_replica`，覆盖两种车的直接生成、自定义名保留、与默认名称相同的命名、升级/撤销，以及清除有无作者的命名后继续切换等级；原版清除命名后残留作者字段的边界也已复现并覆盖。
+- `DeliveryCapacity` 在单个合格箱子能接收所需数量后停止扫描；100 箱均足够接收的场景将单次容量查询从 100 次降至 1 次。新增不足容量时寻找单箱最大值、样品/过滤/冷却排除，以及容量短路不改变实际接收箱偏好的回归。保留真实物品与皮肤检查，不累加多个箱子容量，接触时仍重新验证。调用次数不等于实机帧率。
+- `uv run --locked pytest -q --basetemp .cache/pytest-release-074-final-20261007 --tb=short`：**343 项通过**，本机原版命名与存档检查实际执行。`uv run --locked ruff check tests/test_lua.py`、`ruff format --check tests/test_lua.py`、`ty check tests/test_lua.py`、`uv lock --check` 与 `git diff --check` 通过；Python 源码未再变更，复用本轮 lint、格式和类型检查结果。
+- 模组、工具项目、锁文件与当前版本文档同步为 0.7.4；`modinfo.lua` description 仅更新开头版本号，用户的正文和历史 changelog 保留，依赖不变。发行脚本更新 `publish/` 的 **36 个文件**，白名单及源码逐字节核对通过；美术、动画和音频无需重建。
+- README 与接口文档补充回退限制：旧存档可升级至新版，0.7.3 及以后保存的采集车使用旧版未注册的 `automatic_collector_mk2`，回到 0.7.2 或更早版本需恢复升级前备份。未启动客户端或专用服务器；名称网络同步、多人模组组合与实际服务器负载仍需用户实机验收。
+
+## 制作分类调整为工具（2026-10-07）
+
+- 用户在科学分类与创造模式中找不到物品；原版 `recipes_filter.lua` 确认科学分类键为 `PROTOTYPERS`，之前使用的 `SCIENCE` 不存在，会被 `AddRecipeToFilter` 静默忽略。按用户要求，将拾荒机及升级套件的显式分类统一为 `TOOLS`（工具），移除科学和建筑注册；原版自动添加的模组物品入口保留，材料和炼金引擎解锁要求不变。
+- 新增本机原版制作分类契约检查：读取真实分类表及 `AddRecipe2` / `AddRecipeToFilter`，执行当前 `modmain.lua`，确认两个配方进入工具与模组物品分类，并且不进入科学或建筑分类。不启动游戏，不分发原版脚本；没有本机游戏时跳过该项。
+- `uv run --locked pytest -q --basetemp .cache/pytest-crafting-tools-20261007 --tb=short`：**338 项通过**，原版分类检查实际执行。`uv run --locked ruff check tests/test_lua.py`、`ruff format --check tests/test_lua.py`、`ty check tests/test_lua.py` 及 `git diff --check` 通过。
+- README、开发者指南及技术报告同步；发行脚本更新 `publish/` 的 **36 个文件**，白名单及与源码逐字节比对通过。版本保持 0.7.3，`modinfo.lua` description 未修改。未启动客户端或专用服务器；替换游戏模组文件并重新载入世界后，需实机检查两种配方在工具分类中的显示及制作。
+
+## v0.7.3 版本与发行（2026-10-07）
+
+- 模组、工具项目、锁文件、README、技术报告和音效说明同步为 0.7.3。按用户要求在 `modinfo.lua` description 的 changelog 新增简述：“区分拾荒机和采集车的代码名，兼容旧存档”；功能介绍和历史更新内容保留。
+- `uv lock --check` 通过；模组与工具版本、文档版本以及 description 的精确变更核对通过，锁文件仅修改本项目版本，依赖未变。`uv run --locked pytest -q --basetemp .cache/pytest-release-073-20261007 --tb=short`：**337 项通过**。Python 源码及检查配置未变，复用前一轮 Ruff、格式和 ty 的通过结果；`git diff --check` 通过。
+- 发行脚本更新 `publish/` 的 **36 个文件**，白名单及源码逐字节比对通过。美术、动画与音频无需重建；未启动客户端或专用服务器，实机验收范围见下方代码名拆分记录。
+
+## 两款小车代码名拆分（2026-10-07）
+
+- 拾荒机保留 `automatic_collector`，采集车独立注册为 `automatic_collector_mk2`；直接生成采集车时默认具备内置底盘等级 1、移速 6 与工作半径 20。两款车保留共同标签，升级使用原版 `SetPrefabName` 更新原实体的 Lua / 引擎名称，撤销与失败回滚恢复普通车代码。
+- 新增独立 prefab 行为场景及本机原版实体命名、持久化、显示名和 `SpawnSaveRecord` 契约检查。覆盖直接生成、携货升级时保留同一实体和原有采集偏好/批次、客户端 dirty 与晚加入、撤销等级后的显示名、新旧存档的代码和未知扩展等级。旧采集车从 `automatic_collector` 记录恢复，后续存档自动使用新代码；Insight 两款车的范围提示注册均通过。
+- `uv run pytest -q --basetemp .cache/pytest-distinct-prefabs-20261007 --tb=short`：**337 项通过**，本机原版命名与存档检查实际执行。首次全量运行因系统临时目录权限导致 5 项发行测试初始化失败，改用仓库内临时目录后全部通过。`uv run ruff check tests/test_lua.py`、`ruff format --check tests/test_lua.py`、`ty check tests/test_lua.py` 通过；格式修正未改变语义，复用修正前的 lint / 类型结果。
+- README、扩展接口、开发者指南和技术报告同步新代码；模组版本保持 0.7.2，`modinfo.lua` description 未修改。发行脚本更新 `publish/` 的 **36 个文件**，白名单及与源码逐字节比对通过。美术与声音未改动，无需重建资源。未启动客户端或专用服务器；需用户在主机及远端客户端检查两款车生成、升级、检查描述、Insight 悬停和存档重载。
+
 ## v0.7.2 版本与发行（2026-10-07）
 
 - 本次版本包含运输途中停顿、可行走岸边延伸区域卡住及升级套件堆叠模组兼容三项修复。模组、工具项目、锁文件、README、技术报告及音效说明同步为 0.7.2；`modinfo.lua` description 仅更新开头的版本号，锁文件仅变更本项目版本，依赖未变。

@@ -6,7 +6,13 @@
 
 0.6.0 内置注册 `ac_chassis_mk2`，`maxlevel = 1`。套件通过服务端 `ac_upgradeitem:Install(doer, target)` 安装；不要仅以 `SetLevel` 的返回值判断首次成功，该接口接受重复同等级设置。内置等级 1 绝对设置移速倍率 2、作业倍率 1，等级 0 恢复倍率 1；加载与重复应用不累乘。0.6.1 将等级 1 的工作半径固定为 20，等级 0 恢复服务器配置半径；应用时清除接收箱缓存并同步 `_ac_radius`，安装失败恢复升级前半径。其他速度或范围扩展若覆盖同一字段，需要自行合并。
 
-`_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端据此刷新 bank、build、地图图标、显示名与碰撞尺寸；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。仍使用 `automatic_collector` prefab，升级不会替换实体。
+两款车分别使用 `automatic_collector`（拾荒机）和 `automatic_collector_mk2`（采集车）prefab，由 `prefabs/automatic_collector.lua` 同时注册，共用组件与生命周期。`SpawnPrefab("automatic_collector_mk2")` 直接生成内置底盘等级 1 的采集车；`ac_upgrades.BASE_PREFAB` / `ADVANCED_PREFAB` 提供对应名称常量。升级保留原实体，通过原版 `SetPrefabName` 同步 Lua 与引擎身份，使新存档记录正确的 prefab；撤销等级或安装失败回滚时恢复普通车代码。旧存档仍可从 `automatic_collector` 加载，按原升级等级自动迁移为采集车代码。
+
+0.7.4 恢复原版 `GetBasicDisplayName` 的优先级：扩展的 `displaynamefn`、`nameoverride`、带作者信息的过滤名称、`inst.name`。等级刷新仅更新未被自定义的默认名称；`named` 的非空名称即使恰好等于“拾荒机”或“采集车”，也会保留。需使用这两个默认字符串作为固定自定义名时，使用原版 `named` 组件，而不是仅赋值 `inst.name`。原版 `named` 负责自定义名称的网络同步和持久化。
+
+存档兼容方向为旧版升级至新版。0.7.3 及以后写入的采集车记录使用 `automatic_collector_mk2`，0.7.2 及更早版本未注册此代码，不能恢复这些记录；降回旧模组应使用升级前的世界备份。
+
+`_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端据此同步 prefab 名称并刷新 bank、build、地图图标、显示名与碰撞尺寸；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。两款车继续共用 `automatic_collector` 标签；查找所有小车时使用该标签，针对单款车时比较 `inst.prefab`。需要初始化两款车的扩展应分别注册两个 prefab 的 `AddPrefabPostInit`。
 
 两款小车的物理胶囊统一为半径 .25（直径 .5），胶囊高度参数为 1；质量、碰撞组、掩码与美术缩放保持原值。新建、服务端升级/读档及客户端 dirty/晚加入刷新均应用该尺寸，撤销等级或安装失败回滚也保持此尺寸。导航直接读取实际 Physics 半径。
 
@@ -126,7 +132,7 @@ end
 
 ## 玩家拾取
 
-两款车共用 `automatic_collector` prefab，原版 `inventoryitem.canbepickedup` 固定为 false，并由原版 replica 同步资格；升级和载入不恢复该值。原版 `GetActionButtonAction` 的自动扫描和指定目标/RPC 复查均因此跳过小车，其他物品仍使用原版动作选择。
+两款车共用 `automatic_collector` 标签，原版 `inventoryitem.canbepickedup` 固定为 false，并由原版 replica 同步资格；升级和载入不恢复该值。原版 `GetActionButtonAction` 的自动扫描和指定目标/RPC 复查均因此跳过小车，其他物品仍使用原版动作选择。
 
 `AC_PICKUP` 只在小车的左键 `SCENE:inventoryitem` 候选中加入，右键不加入；使用原版拾取优先级、骑乘标志与额外到达距离，为 `wilson` / `wilson_client` 注册 `doshortaction`。服务端复查小车与玩家有效性、是否已收起、火焰、幽灵及 `itemtyperestrictions`，通过后发送原版 `onpickupitem` 事件并调用 `inventory:GiveItem`。小车自身的拾取回调继续取消任务、清除工作中心并交还真实货物。扩展应保持快捷拾取资格为 false，不覆盖原版全局拾取动作或输入方法。
 
@@ -156,6 +162,6 @@ end
 
 ## Insight 显示接入
 
-`ac_insight` 在 `AddSimPostInit` 中检测 `GLOBAL.Insight.API.V1`，注册 `ac_worker` 组件描述器及 `automatic_collector` prefab 的 `OnSelect` / `OnUnselect`。不依赖工坊目录名，不导入或分发第三方脚本；未启用 Insight 时直接跳过。
+`ac_insight` 在 `AddSimPostInit` 中检测 `GLOBAL.Insight.API.V1`，注册 `ac_worker` 组件描述器及 `automatic_collector`、`automatic_collector_mk2` 两个 prefab 的 `OnSelect` / `OnUnselect`。不依赖工坊目录名，不导入或分发第三方脚本；未启用 Insight 时直接跳过。
 
 服务端描述器读取真实组件：普通拾荒机显示拾取与运输能力，采集车另显示采集开关及农作物批次进度与阶段；客户端范围显示只读取 `_ac_home_valid`、`_ac_home_x`、`_ac_home_z`、`_ac_home_platform`、`_ac_radius` 网络字段。无平台时坐标为世界坐标，有平台时为平台局部坐标；工作中心在放置、拾取和存档恢复时同步。范围圈使用客户端临时锚点，每 .1 秒更新平台位置，取消悬停或实体移除时清理，收起时隐藏。扩展客户端不得修改这些字段。

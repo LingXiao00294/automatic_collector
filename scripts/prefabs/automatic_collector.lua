@@ -30,7 +30,7 @@ local function OnRemove(inst)
     inst.components.inventory:DropEverything()
 end
 
-local function fn()
+local function fn(advanced)
     local inst = CreateEntity()
     inst.entity:AddTransform()
     inst.entity:AddAnimState()
@@ -58,7 +58,6 @@ local function fn()
     inst._ac_enabled = net_bool(inst.GUID, "ac.enabled")
     inst._ac_harvest_enabled = net_bool(inst.GUID, "ac.harvest_enabled")
     inst._ac_mk2 = net_bool(inst.GUID, "ac.mk2", "ac_mk2dirty")
-    inst.displaynamefn = Upgrades.DisplayName
     inst:ListenForEvent("ac_mk2dirty", Upgrades.RefreshVisual)
     inst._ac_blocked = net_bool(inst.GUID, "ac.blocked")
     inst._ac_home_valid = net_bool(inst.GUID, "ac.home_valid")
@@ -69,6 +68,7 @@ local function fn()
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
     inst._ac_harvest_enabled:set(true)
+    if TheWorld.ismastersim then inst._ac_mk2:set(advanced) end
     inst.entity:SetPristine()
     Upgrades.RefreshVisual(inst)
     if not TheWorld.ismastersim then return inst end
@@ -96,6 +96,7 @@ local function fn()
         require("ac_navigation").Attach(inst)
     end
     inst:AddComponent("ac_upgradable")
+    if advanced then inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 1) end
     inst:ListenForEvent("ac_enabledchanged", Sounds.OnEnabledChanged)
     inst:ListenForEvent("ac_harvestenabledchanged", Sounds.OnEnabledChanged)
     inst:SetStateGraph("SGac_collector")
@@ -117,4 +118,13 @@ local function fn()
     return inst
 end
 
-return Prefab("automatic_collector", fn, assets)
+local function basefn()
+    return fn(false)
+end
+
+local function advancedfn()
+    return fn(true)
+end
+
+return Prefab(Upgrades.BASE_PREFAB, basefn, assets),
+    Prefab(Upgrades.ADVANCED_PREFAB, advancedfn, assets)
