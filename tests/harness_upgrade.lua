@@ -4,10 +4,14 @@ local UpgradeItem = require("components/ac_upgradeitem")
 local Upgradable = require("components/ac_upgradable")
 local API = require("ac_api")
 TheWorld = { ismastersim = true }
-STRINGS = { NAMES = { AUTOMATIC_COLLECTOR_MK2 = "采集车" } }
+STRINGS = { NAMES = { AUTOMATIC_COLLECTOR = "拾荒机", AUTOMATIC_COLLECTOR_MK2 = "采集车" } }
 Upgrades.Register()
 
 local function visuals(inst)
+    function inst:SetPrefabName(name)
+        self.prefab, self.native_prefab = name, name
+        self.name = self.name or STRINGS.NAMES[string.upper(name)]
+    end
     local level = false
     inst._ac_mk2 = { value = function() return level end, set = function(_, v) level = v end }
     inst.AnimState = {
@@ -46,6 +50,7 @@ function scenarios.upgrade_single_and_stack()
         local guid = w.inst
         assert(installer:Install(player, w.inst))
         assert(w.inst == guid and Upgrades.IsAdvanced(w.inst))
+        assert(w.inst.prefab == "automatic_collector_mk2" and w.inst.native_prefab == w.inst.prefab)
         assert(w.inst.Physics:GetRadius() == .25 and w.inst.Physics.height == 1)
         assert(w.inst.components.locomotor.walkspeed == 6 and w.action_speed == 1)
         assert(w.inst.bank == "automatic_collector_mk2" and w.inst.build == w.inst.bank)
@@ -116,6 +121,7 @@ function scenarios.upgrade_apply_rollback()
     assert(not installer:Install(player, w.inst))
     API.upgrades[Upgrades.CHASSIS].apply = original
     assert(not Upgrades.IsAdvanced(w.inst) and w.inst.bank == "automatic_collector")
+    assert(w.inst.prefab == "automatic_collector" and w.inst.native_prefab == w.inst.prefab)
     assert(w.inst.Physics:GetRadius() == .25, "Failed installation must preserve the shared collision radius")
     assert(w.inst.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 0)
     assert(w.inst.components.locomotor.walkspeed == 4.5 and w.action_speed == 1.25)
@@ -192,6 +198,7 @@ function scenarios.upgrade_consumption_rollback()
     assert(not installer:Install(player, w.inst))
     assert(kit:IsValid() and kit.components.inventoryitem.owner == player)
     assert(not Upgrades.IsAdvanced(w.inst) and w.inst.components.locomotor.walkspeed == 3)
+    assert(w.inst.prefab == "automatic_collector")
     assert(not installer.installing and not w.inst._ac_installing)
     kit.Remove = function(self) remove(self) error("injected post-removal failure") end
     assert(installer:Install(player, w.inst))
@@ -346,6 +353,9 @@ local function prefab_runtime(stack_post_init)
         visuals(inst)
         inst.GUID = #inst.events + 1
         inst.entity = {}
+        inst.entity.SetPrefabName = function(_, name) inst.native_prefab = name end
+        inst.entity.HasTag = function(_, tag) return inst:HasTag(tag) end
+        inst.entity.IsValid = function() return inst:IsValid() end
         for _, name in ipairs({ "AddTransform", "AddAnimState", "AddSoundEmitter", "AddDynamicShadow",
             "AddMiniMapEntity", "AddNetwork", "AddLight" }) do inst.entity[name] = function() end end
         inst.entity.SetPristine = function()
@@ -382,6 +392,7 @@ local function prefab_runtime(stack_post_init)
         end
         function inst:SetStateGraph() self.sg = { GoToState = function() end } end
         function inst:SetBrain() end
+        for name, method in pairs(NativeEntityScript or {}) do inst[name] = method end
         return inst
     end
     local function net(_, name, dirty)
@@ -394,8 +405,84 @@ local function prefab_runtime(stack_post_init)
     end
     net_bool, net_float, net_entity = net, net, net
     package.loaded["prefabs/automatic_collector"] = nil
-    local prefab = require("prefabs/automatic_collector")
-    return prefab, function(value) seed = value end, native_locomotor
+    local prefab, advanced = assert(loadfile(TEST_ROOT .. "/scripts/prefabs/automatic_collector.lua"))()
+    package.loaded["prefabs/automatic_collector"] = prefab
+    return prefab, function(value) seed = value end, native_locomotor, advanced
+end
+
+function scenarios.collector_distinct_prefabs()
+    local base, set_seed, _, advanced = prefab_runtime()
+    assert(base.name == "automatic_collector" and advanced.name == "automatic_collector_mk2")
+    TheWorld.ismastersim = true
+    local ordinary, collector = base.fn(), advanced.fn()
+    assert(ordinary.prefab == base.name and collector.prefab == advanced.name)
+    assert(not ordinary.components.ac_worker:IsHarvestEnabled())
+    assert(collector.components.ac_worker:IsHarvestEnabled())
+    assert(collector.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == 1)
+    assert(collector.components.locomotor.walkspeed == 6 and collector.components.ac_worker.radius == 20)
+    assert(ordinary:displaynamefn() == "拾荒机" and collector:displaynamefn() == "采集车")
+    assert(ordinary:HasTag("automatic_collector") and collector:HasTag("automatic_collector"))
+    local cargo = H.item("twigs", 0, nil, 7)
+    ordinary.components.inventory:GiveItem(cargo)
+    ordinary.components.ac_worker.farm_count = 3
+    ordinary.components.ac_worker:SetHarvestEnabled(false)
+    assert(ordinary.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 1))
+    assert(ordinary.prefab == advanced.name and ordinary.components.ac_worker:GetCargo() == cargo)
+    assert(ordinary.components.ac_worker.farm_count == 3 and not ordinary._ac_harvest_enabled:value())
+    assert(collector.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
+    assert(collector.prefab == base.name and collector.native_prefab == base.name)
+    assert(collector:displaynamefn() == "拾荒机" and not collector.components.ac_worker:IsHarvestEnabled())
+    TheWorld.ismastersim = false
+    set_seed(true)
+    local client = advanced.fn()
+    assert(client.prefab == advanced.name and client.components.ac_worker == nil)
+    assert(client:displaynamefn() == "采集车")
+    client._ac_mk2:set(false)
+    assert(client.prefab == base.name and client.native_prefab == base.name)
+    assert(client:displaynamefn() == "拾荒机")
+end
+
+-- Uses the installed game's actual EntityScript and SpawnSaveRecord methods.
+function scenarios.collector_prefab_native_save_load()
+    local base, _, _, advanced = prefab_runtime()
+    local prefabs = { [base.name] = base, [advanced.name] = advanced }
+    SpawnPrefab = function(name)
+        local inst = prefabs[name].fn()
+        inst:SetPrefabName(inst.prefab or name)
+        return inst
+    end
+    TheWorld.ismastersim = true
+    for _, name in ipairs({ base.name, advanced.name }) do
+        local inst = SpawnPrefab(name)
+        local worker = inst.components.ac_worker
+        inst.Transform:SetPosition(3, 0, 4)
+        worker:SetHome()
+        worker:SetHarvestEnabled(false)
+        worker.farm_count, worker.farm_draining = 3, true
+        inst.components.ac_upgradable.levels.unknown_extension = 4
+        local record = inst:GetSaveRecord()
+        assert(record.prefab == name and inst.native_prefab == name)
+        local restored = SpawnSaveRecord(record)
+        assert(restored.prefab == name and restored.native_prefab == name)
+        assert(restored:GetBasicDisplayName() == (name == base.name and "拾荒机" or "采集车"))
+        assert(restored.components.ac_upgradable:GetLevel("unknown_extension") == 4)
+        local loaded = restored.components.ac_worker
+        assert(loaded:GetHome().x == 3 and loaded:GetHome().z == 4)
+        assert(loaded.farm_count == 3 and loaded.farm_draining and not loaded.harvest_enabled)
+        assert(loaded:IsHarvestEnabled() == false)
+        if name == advanced.name then
+            -- Old worlds saved the upgraded car under the base prefab name.
+            record.prefab = base.name
+            local legacy = SpawnSaveRecord(record)
+            assert(legacy.prefab == advanced.name and legacy.native_prefab == advanced.name)
+            assert(legacy:GetSaveRecord().prefab == advanced.name)
+            assert(legacy.components.locomotor.walkspeed == 6 and legacy.components.ac_worker.radius == 20)
+            assert(legacy.components.ac_worker.farm_count == 3 and not legacy._ac_harvest_enabled:value())
+            assert(legacy.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
+            local downgraded = SpawnSaveRecord(legacy:GetSaveRecord())
+            assert(downgraded.prefab == base.name and downgraded:GetBasicDisplayName() == "拾荒机")
+        end
+    end
 end
 
 function scenarios.upgrade_prefab_client_and_host()
@@ -406,14 +493,17 @@ function scenarios.upgrade_prefab_client_and_host()
     TheWorld.ismastersim = false
     local client = prefab.fn()
     assert(client.components.ac_worker == nil and client.bank == "automatic_collector")
+    assert(client.prefab == "automatic_collector" and client:displaynamefn() == "拾荒机")
     assert(client.Physics:GetRadius() == .25)
     assert(client._ac_harvest_enabled:value())
     client._ac_mk2:set(true)
+    assert(client.prefab == "automatic_collector_mk2" and client.native_prefab == client.prefab)
     assert(client.bank == "automatic_collector_mk2" and client.mapicon == "automatic_collector_mk2.tex")
     assert(client.Physics:GetRadius() == .25)
     assert(client:displaynamefn() == "采集车")
     set_seed(true)
     local late = prefab.fn()
+    assert(late.prefab == "automatic_collector_mk2")
     assert(late.bank == "automatic_collector_mk2" and late.components.ac_upgradable == nil)
     assert(late.Physics:GetRadius() == .25)
     set_seed(false)
@@ -423,6 +513,7 @@ function scenarios.upgrade_prefab_client_and_host()
         "The action button must not pick up either car")
     assert(not host.components.ac_worker:IsHarvestEnabled())
     host.components.ac_upgradable:OnLoad({ levels = { [Upgrades.CHASSIS] = 1 } })
+    assert(host.prefab == "automatic_collector_mk2")
     assert(host.bank == "automatic_collector_mk2" and host.components.locomotor.walkspeed == 6)
     assert(host.Physics:GetRadius() == .25)
     assert(host.components.ac_worker.radius == 20 and host._ac_radius:value() == 20)
@@ -517,6 +608,7 @@ function scenarios.upgrade_load_idempotent_and_relocate()
     restored:OnPickup(nil) restored:OnDropped()
     assert(Upgrades.IsAdvanced(restored.inst) and restored.inst.components.locomotor.walkspeed == 6)
     assert(restored.inst.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 0))
+    assert(restored.inst.prefab == "automatic_collector" and Upgrades.DisplayName(restored.inst) == "拾荒机")
     assert(restored.inst.components.locomotor.walkspeed == 3 and restored.inst.bank == "automatic_collector")
     assert(restored.inst.Physics:GetRadius() == .25)
     local legacy = prepare() legacy.inst.components.ac_upgradable:OnLoad(nil)

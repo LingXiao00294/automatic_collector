@@ -1701,6 +1701,8 @@ function scenarios.insight_optional_registration()
     assert(InsightCompat.Register(_G,"test_mod"))
     assert(descriptors.ac_worker.Describe == InsightCompat.Describe)
     assert(prefabs.automatic_collector.OnSelect == InsightCompat.Select)
+    assert(prefabs.automatic_collector_mk2.OnSelect == InsightCompat.Select)
+    assert(prefabs.automatic_collector_mk2.OnUnselect == InsightCompat.Unselect)
     Insight.API.V1.AddPrefabDescriptor = nil
     assert(not InsightCompat.Register(_G,"test_mod"))
 end

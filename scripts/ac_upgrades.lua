@@ -1,5 +1,9 @@
 local API = require("ac_api")
-local Upgrades = { CHASSIS = "ac_chassis_mk2" }
+local Upgrades = {
+    CHASSIS = "ac_chassis_mk2",
+    BASE_PREFAB = "automatic_collector",
+    ADVANCED_PREFAB = "automatic_collector_mk2",
+}
 
 function Upgrades.IsAdvanced(inst)
     return inst._ac_mk2 ~= nil and inst._ac_mk2:value()
@@ -8,7 +12,9 @@ end
 -- Runs on both hosts and clients; it never reads server-only components.
 function Upgrades.RefreshVisual(inst)
     local advanced = Upgrades.IsAdvanced(inst)
-    local name = advanced and "automatic_collector_mk2" or "automatic_collector"
+    local name = advanced and Upgrades.ADVANCED_PREFAB or Upgrades.BASE_PREFAB
+    -- Keep the Lua identity, engine spawn identity and save records in sync.
+    if inst.prefab ~= name then inst:SetPrefabName(name) end
     -- Preserve native character masks, mass and capsule height on every peer.
     inst.Physics:SetCapsule(.25, 1)
     inst.AnimState:SetBank(name)
@@ -17,7 +23,8 @@ function Upgrades.RefreshVisual(inst)
 end
 
 function Upgrades.DisplayName(inst)
-    return Upgrades.IsAdvanced(inst) and STRINGS.NAMES.AUTOMATIC_COLLECTOR_MK2 or nil
+    local name = Upgrades.IsAdvanced(inst) and Upgrades.ADVANCED_PREFAB or Upgrades.BASE_PREFAB
+    return STRINGS.NAMES[string.upper(name)]
 end
 
 function Upgrades.Apply(inst, level)
@@ -30,7 +37,7 @@ function Upgrades.Apply(inst, level)
     worker:SyncHome()
     inst._ac_mk2:set(advanced)
     Upgrades.RefreshVisual(inst)
-    local name = advanced and "automatic_collector_mk2" or "automatic_collector"
+    local name = advanced and Upgrades.ADVANCED_PREFAB or Upgrades.BASE_PREFAB
     inst.components.inventoryitem.atlasname = "images/inventoryimages/" .. name .. ".xml"
     inst.components.inventoryitem:ChangeImageName(name)
 end

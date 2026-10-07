@@ -181,6 +181,7 @@ def test_lua_51_syntax():
         "upgrade_load_idempotent_and_relocate",
         "upgrade_work_timing_and_walk_reset",
         "upgrade_recipe_and_action_selection",
+        "collector_distinct_prefabs",
         "upgrade_prefab_client_and_host",
         "upgrade_kit_preserves_stack_mod_settings",
         "collector_mouse_pickup",
@@ -188,6 +189,45 @@ def test_lua_51_syntax():
 )
 def test_scenario(lua, scenario):
     lua.globals().scenarios[scenario]()
+
+
+def test_native_collector_prefab_save_load(lua):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native prefab save/load contract check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        entity_source = (
+            scripts.read("scripts/entityscript.lua").decode("utf-8").replace("\r\n", "\n")
+        )
+        spawn_source = (
+            scripts.read("scripts/mainfunctions.lua").decode("utf-8").replace("\r\n", "\n")
+        )
+    lua.execute("""
+        EntityScript = {}
+        IsTableEmpty = function(values) return next(values) == nil end
+        isbadnumber = function(value)
+            return value ~= value or value == math.huge or value == -math.huge
+        end
+    """)
+    for method in (
+        "SetPrefabName",
+        "GetBasicDisplayName",
+        "GetSaveRecord",
+        "GetPersistData",
+        "SetPersistData",
+    ):
+        start = entity_source.index(f"function EntityScript:{method}(")
+        end = entity_source.index("\nend", start) + len("\nend")
+        lua.execute(entity_source[start:end], name=f"@native/entityscript/{method}.lua")
+    lua.globals().NativeEntityScript = lua.globals().EntityScript
+    start = spawn_source.index("local function ResolveSaveRecordPosition(")
+    save_start = spawn_source.index("function SpawnSaveRecord(", start)
+    end = spawn_source.index("\nend", save_start) + len("\nend")
+    lua.execute(spawn_source[start:end], name="@native/mainfunctions/SpawnSaveRecord.lua")
+    lua.globals().scenarios.collector_prefab_native_save_load()
 
 
 @pytest.mark.parametrize("ismastersim", [False, True])

@@ -51,6 +51,8 @@ strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR = {
     BLOCKED = "这批货暂时运不出去。",
     HELD = "放在地上，就能开始工作。",
 }
+strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR_MK2 =
+    strings.CHARACTERS.GENERIC.DESCRIBE.AUTOMATIC_COLLECTOR
 
 AddRecipe2("automatic_collector", {
     G.Ingredient("boards", 2), G.Ingredient("cutstone", 2), G.Ingredient("gears", 1),
