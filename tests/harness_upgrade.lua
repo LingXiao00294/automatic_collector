@@ -327,7 +327,7 @@ function scenarios.harvest_toggle_upgrade_and_load_order()
     assert(legacy_base.farm_count == 3 and legacy_base.farm_draining)
 end
 
-local function prefab_runtime()
+local function prefab_runtime(stack_post_init)
     local current, seed
     local native_locomotor = {
         SetTriggersCreep = function() end,
@@ -375,6 +375,9 @@ local function prefab_runtime()
             elseif name == "ac_worker" then self.components[name] = require("components/ac_worker")(self)
             elseif name == "ac_upgradable" then self.components[name] = Upgradable(self)
             elseif name == "ac_upgradeitem" then self.components[name] = UpgradeItem(self)
+            elseif name == "stackable" then
+                self.components[name] = { maxsize = TUNING.STACK_SIZE_MEDITEM }
+                if stack_post_init ~= nil then stack_post_init(self.components[name]) end
             else self.components[name] = {} end
         end
         function inst:SetStateGraph() self.sg = { GoToState = function() end } end
@@ -460,6 +463,29 @@ function scenarios.upgrade_prefab_client_and_host()
     TheWorld.ismastersim = false
     local kit_client = kit_prefab.fn()
     assert(kit_client:HasTag("ac_upgrade_kit") and kit_client.components.ac_upgradeitem == nil)
+end
+
+function scenarios.upgrade_kit_preserves_stack_mod_settings()
+    TheWorld.ismastersim = true
+    local native_default = TUNING.STACK_SIZE_MEDITEM
+    for _, config in ipairs({
+        { default = 20, maxsize = 20 },
+        { default = 64, maxsize = 64 },
+        { default = 128, maxsize = 128 },
+        { default = 20, maxsize = 40 },
+        { default = 64, maxsize = math.huge, originalmaxsize = 64 },
+    }) do
+        TUNING.STACK_SIZE_MEDITEM = config.default
+        prefab_runtime(function(stack)
+            stack.maxsize, stack.originalmaxsize = config.maxsize, config.originalmaxsize
+        end)
+        package.loaded["prefabs/ac_upgrade_kit"] = nil
+        local kit = require("prefabs/ac_upgrade_kit").fn()
+        assert(kit.components.stackable.maxsize == config.maxsize,
+            "Upgrade kits must preserve the stack limit set by native or mod initialization")
+        assert(kit.components.stackable.originalmaxsize == config.originalmaxsize)
+    end
+    TUNING.STACK_SIZE_MEDITEM = native_default
 end
 
 function scenarios.upgrade_store_closes_only_own_opener()

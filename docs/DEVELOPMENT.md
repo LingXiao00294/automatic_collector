@@ -45,6 +45,8 @@ uv run --locked ty check tools tests
 
 启动兼容回归另使用 Lupa 的 Lua 5.1 和 LuaJIT：提供全局 `bit` 并拒绝 `require("bit")`，执行真实小车 prefab 的客户端/服务端初始化及导航碰撞掩码场景。该检查不依赖安装游戏，避免 LuaJIT 自带模块掩盖 DST 注册 prefab 时的加载错误。
 
+升级套件堆叠回归包含不依赖游戏安装的组件初始化设置保留场景，以及 `tests/test_stackable.py` 的原版契约检查。后者从本机 `scripts.zip` 只读加载原版 Class、`stackable` 与 `stackable_replica`，执行真实套件 prefab，覆盖默认档位、统一上限 64、各档位分别修改、组件初始化回调与无限堆叠，并检查主机/客户端初始化、拆分、存档恢复及数量守恒。可通过 `DST_GAME_ROOT` 指定安装目录；未安装游戏时跳过原版检查，不启动游戏或分发游戏源码。
+
 `tests/test_navigation.py` 在地形/碰撞夹具和本机原版 locomotor 方法两种模式下执行范围内避障场景，覆盖连续障碍转弯、行走动画循环重新设速、岸边拾取、隔水拒绝和普通坐标表路径点。调度场景另加载本机原版 Brain、BrainManager、行为树、`DoAction` 与 `StandStill`，覆盖放置、长时间待机、多车和快速动作后的下一任务；生命周期场景继续加载 SGManager、实际小车 StateGraph、原版动作提交与实体 BufferedAction 方法，检查完整拾取运输、返程抢占及返程失败后重选。人为设置 BrainManager 睡眠 10 秒或 Hibernate 的场景属于故障注入，只验证主动唤醒能力。原版方法从安装目录的 `data/databundles/scripts.zip` 只读加载；可通过 `DST_GAME_ROOT` 指定安装目录，未安装时跳过需要原版源码的检查，独立寻路夹具仍可运行。测试模拟时间与物理位移，不启动游戏，不分发游戏源码；客户端物理与服务器负载仍须实测。
 
 多车回归覆盖 8 车同点共享搜索预算、搜索等待中的收起/容量变化、原版状态机暂停与恢复，以及围墙内保留货物并在拆墙后完整配送。平台场景覆盖跨帧搜索时船体平移/旋转、平台移除和新建障碍。寻路性能记录统计夹具中的 `Pathfinder:IsClear` 调用，不能直接换算为游戏帧率；夹具中让其他小车让路也不代表真实碰撞推挤已验证。

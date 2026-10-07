@@ -23,8 +23,8 @@ local function fn()
     inst:AddComponent("inventoryitem")
     inst.components.inventoryitem.atlasname = "images/inventoryimages/ac_upgrade_kit.xml"
     inst.components.inventoryitem:ChangeImageName("ac_upgrade_kit")
+    -- Preserve the native default and stack-mod component initialization.
     inst:AddComponent("stackable")
-    inst.components.stackable.maxsize = 20
     inst:AddComponent("ac_upgradeitem")
     MakeHauntableLaunch(inst)
     return inst

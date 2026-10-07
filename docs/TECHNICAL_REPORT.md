@@ -23,6 +23,12 @@
 
 `ac_navigation` 仅在服务端初始化小车且启用新版寻路时加载，碰撞掩码计算直接使用引擎提供的全局 `bit`。DST 没有可供 `require("bit")` 加载的模块；此前在 prefab 注册时错误地调用它，导致地表与洞穴分片启动失败。Lupa 的 LuaJIT 自带该模块，因此启动回归另在 Lua 5.1 和 LuaJIT 中模拟“全局可用、模块不可加载”的引擎环境。
 
+## 升级套件与堆叠
+
+`ac_upgrade_kit` 仅添加原版 `stackable`，保留组件默认的 `TUNING.STACK_SIZE_MEDITEM`（原版为 20）以及堆叠模组在组件初始化回调中设置的上限或无限堆叠规则，不在 prefab 中再次赋值。拆分与存档恢复继续由原版组件执行，不改变数量或存档格式。
+
+原版 `stackable_replica` 从 `TUNING.STACK_SIZE_*` 建立有限的网络档位表；`maxsize` 属性赋值会立即调用 replica 的 `SetMaxSize`。此前套件写死 `20`，当堆叠模组将档位改为 `64` 等值时，查表返回 `nil` 并在初始化时崩溃。重新赋值为 `TUNING.STACK_SIZE_MEDITEM` 仍会覆盖组件初始化回调的设置，因此直接沿用原版组件初始化结果。此修复不替换任何全局堆叠组件或网络同步方法。
+
 ## 两款车的功能与采集开关
 
 普通拾荒机仅拾取地面物品和运输，不执行采摘、收获、巨大作物敲击或资源适配器。`ac_worker:IsHarvestEnabled()` 结合 `_ac_mk2` 与单车 `harvest_enabled` 判断采集能力；`ac_targets.Kind` 在规划与接触复查中使用该条件，具体能力同时遵守 `pick_plants` 和 `hammer_giants` 配置。
