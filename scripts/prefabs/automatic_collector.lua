@@ -68,10 +68,15 @@ local function fn(advanced)
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
     inst._ac_harvest_enabled:set(true)
-    if TheWorld.ismastersim then inst._ac_mk2:set(advanced) end
+    -- Both peers must use the same prefab defaults before SetPristine.
+    inst._ac_mk2:set(advanced)
     inst.entity:SetPristine()
     Upgrades.RefreshVisual(inst)
-    if not TheWorld.ismastersim then return inst end
+    if not TheWorld.ismastersim then
+        -- Initial net values arrive after construction without a dirty event.
+        inst:DoStaticTaskInTime(0, Upgrades.RefreshVisual)
+        return inst
+    end
 
     inst:AddComponent("inspectable")
     inst.components.inspectable.getstatus = GetStatus

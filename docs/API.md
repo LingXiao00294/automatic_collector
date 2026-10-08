@@ -14,6 +14,8 @@
 
 `_ac_mk2` 为在 `SetPristine` 前声明的只读布尔网络字段，客户端据此同步 prefab 名称并刷新 bank、build、地图图标、显示名与碰撞尺寸；服务端通过原版 `inventoryitem` 的 atlas/image 字段同步库存图标。两款车继续共用 `automatic_collector` 标签；查找所有小车时使用该标签，针对单款车时比较 `inst.prefab`。需要初始化两款车的扩展应分别注册两个 prefab 的 `AddPrefabPostInit`。
 
+两端构造时均按 prefab 入口初始化 `_ac_mk2`：拾荒机为 false，采集车为 true，然后调用 `SetPristine`。不能只在服务端设置 mk2 初值；初始同步未再次下发该字段时，客户端必须依靠同一 prefab 的相同默认值保持等级。构造后初始反序列化仍不保证触发 `ac_mk2dirty`，因此保留客户端 `DoStaticTaskInTime(0, ...)` 的一次复查及后续 dirty 刷新。刷新同步 Lua / 引擎 prefab、外观与名称，不读取服务端组件，不改写升级存档或货物。
+
 两款小车的物理胶囊统一为半径 .25（直径 .5），胶囊高度参数为 1；质量、碰撞组、掩码与美术缩放保持原值。新建、服务端升级/读档及客户端 dirty/晚加入刷新均应用该尺寸，撤销等级或安装失败回滚也保持此尺寸。导航直接读取实际 Physics 半径。
 
 ```lua
