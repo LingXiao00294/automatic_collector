@@ -254,6 +254,9 @@ def native_collector(lua):
         spawn_source = (
             scripts.read("scripts/mainfunctions.lua").decode("utf-8").replace("\r\n", "\n")
         )
+        replica_source = (
+            scripts.read("scripts/entityreplica.lua").decode("utf-8").replace("\r\n", "\n")
+        )
         named_sources = {
             name: scripts.read(f"scripts/{name}.lua").decode("utf-8")
             for name in ("class", "components/named", "components/named_replica")
@@ -276,6 +279,14 @@ def native_collector(lua):
         end = entity_source.index("\nend", start) + len("\nend")
         lua.execute(entity_source[start:end], name=f"@native/entityscript/{method}.lua")
     lua.globals().NativeEntityScript = lua.globals().EntityScript
+    start = replica_source.index("function EntityScript:ReplicateEntity(")
+    end = replica_source.index("\nend", start) + len("\nend")
+    lua.execute(replica_source[start:end], name="@native/entityreplica/ReplicateEntity.lua")
+    for function in ("SpawnPrefab", "SpawnPrefabFromSim"):
+        start = spawn_source.index(f"function {function}(")
+        end = spawn_source.index("\nend", start) + len("\nend")
+        lua.execute(spawn_source[start:end], name=f"@native/mainfunctions/{function}.lua")
+    lua.globals().NativeSpawnPrefab = lua.globals().SpawnPrefab
     start = spawn_source.index("local function ResolveSaveRecordPosition(")
     save_start = spawn_source.index("function SpawnSaveRecord(", start)
     end = spawn_source.index("\nend", save_start) + len("\nend")
@@ -292,6 +303,15 @@ def native_collector(lua):
 
 def test_native_collector_prefab_save_load(native_collector):
     native_collector.globals().scenarios.collector_prefab_native_save_load()
+
+
+@pytest.mark.parametrize("prefab_name", ["automatic_collector", "automatic_collector_mk2"])
+@pytest.mark.parametrize("initial_phase", ["before_replication", "after_replication"])
+@pytest.mark.parametrize("advanced_value", [False, True], ids=["base", "mk2"])
+def test_native_collector_rejoin(native_collector, prefab_name, initial_phase, advanced_value):
+    native_collector.globals().scenarios.collector_native_rejoin(
+        prefab_name, initial_phase, advanced_value
+    )
 
 
 @pytest.mark.parametrize("ismastersim", [False, True], ids=["client", "host"])

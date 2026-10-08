@@ -51,6 +51,8 @@ uv run --locked ty check tools tests
 
 制作分类回归同样从本机读取原版 `recipes_filter.lua` 和 `modutil` 的 `AddRecipe2` / `AddRecipeToFilter`，执行真实 `modmain.lua`，检查拾荒机与升级套件进入工具分类及原版自动添加的模组物品入口，且不进入科学或建筑分类。该项只验证分类注册，不渲染游戏制作界面；缺少游戏时跳过。
 
+重进/晚加入检查另加载原版 `SpawnPrefab`、`SpawnPrefabFromSim` 与 `EntityScript:ReplicateEntity`，在夹具中模拟构造后网络值反序列化且不触发 dirty 的情况。覆盖普通/高级生成入口、网络值在 replica 初始化前后就绪、两种实际等级、连续三次重建及随后升级/撤销、自定义名保留。静态任务由队列延后执行，不再用立即回调掩盖初始化缺口；网络反序列化与引擎 AnimState 仍为模拟，需要客户端实机复核。
+
 `tests/test_navigation.py` 在地形/碰撞夹具和本机原版 locomotor 方法两种模式下执行范围内避障场景，覆盖连续障碍转弯、行走动画循环重新设速、岸边拾取、隔水拒绝和普通坐标表路径点。调度场景另加载本机原版 Brain、BrainManager、行为树、`DoAction` 与 `StandStill`，覆盖放置、长时间待机、多车和快速动作后的下一任务；生命周期场景继续加载 SGManager、实际小车 StateGraph、原版动作提交与实体 BufferedAction 方法，检查完整拾取运输、返程抢占及返程失败后重选。人为设置 BrainManager 睡眠 10 秒或 Hibernate 的场景属于故障注入，只验证主动唤醒能力。原版方法从安装目录的 `data/databundles/scripts.zip` 只读加载；可通过 `DST_GAME_ROOT` 指定安装目录，未安装时跳过需要原版源码的检查，独立寻路夹具仍可运行。测试模拟时间与物理位移，不启动游戏，不分发游戏源码；客户端物理与服务器负载仍须实测。
 
 多车回归覆盖 8 车同点共享搜索预算、搜索等待中的收起/容量变化、原版状态机暂停与恢复，以及围墙内保留货物并在拆墙后完整配送。平台场景覆盖跨帧搜索时船体平移/旋转、平台移除和新建障碍。寻路性能记录统计夹具中的 `Pathfinder:IsClear` 调用，不能直接换算为游戏帧率；夹具中让其他小车让路也不代表真实碰撞推挤已验证。

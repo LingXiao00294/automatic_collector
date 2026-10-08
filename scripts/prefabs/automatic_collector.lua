@@ -71,7 +71,11 @@ local function fn(advanced)
     if TheWorld.ismastersim then inst._ac_mk2:set(advanced) end
     inst.entity:SetPristine()
     Upgrades.RefreshVisual(inst)
-    if not TheWorld.ismastersim then return inst end
+    if not TheWorld.ismastersim then
+        -- Initial net values arrive after construction without a dirty event.
+        inst:DoStaticTaskInTime(0, Upgrades.RefreshVisual)
+        return inst
+    end
 
     inst:AddComponent("inspectable")
     inst.components.inspectable.getstatus = GetStatus

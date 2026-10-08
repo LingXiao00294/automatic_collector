@@ -336,6 +336,7 @@ end
 
 local function prefab_runtime(stack_post_init)
     local current, seed
+    local static_tasks = {}
     local native_locomotor = {
         SetTriggersCreep = function() end,
         FindPath = function(self) self.native_paths = (self.native_paths or 0) + 1 end,
@@ -354,8 +355,10 @@ local function prefab_runtime(stack_post_init)
         inst.GUID = #inst.events + 1
         inst.entity = {}
         inst.entity.SetPrefabName = function(_, name) inst.native_prefab = name end
+        inst.entity.GetGUID = function() return inst.GUID end
         inst.entity.HasTag = function(_, tag) return inst:HasTag(tag) end
         inst.entity.IsValid = function() return inst:IsValid() end
+        if Ents ~= nil then Ents[inst.GUID] = inst end
         for _, name in ipairs({ "AddTransform", "AddAnimState", "AddSoundEmitter", "AddDynamicShadow",
             "AddMiniMapEntity", "AddNetwork", "AddLight" }) do inst.entity[name] = function() end end
         inst.entity.SetPristine = function()
@@ -371,6 +374,13 @@ local function prefab_runtime(stack_post_init)
         function inst:ListenForEvent(event, fn) self.listeners[event] = fn end
         function inst:PushEvent(event, data)
             if self.listeners[event] ~= nil then self.listeners[event](self, data) end
+        end
+        function inst:DoStaticTaskInTime(delay, fn)
+            assert(delay == 0)
+            local task = { inst = self, fn = fn }
+            function task:Cancel() self.cancelled = true end
+            table.insert(static_tasks, task)
+            return task
         end
         function inst:AddComponent(name)
             if name == "inventoryitem" then
@@ -401,13 +411,23 @@ local function prefab_runtime(stack_post_init)
         return { value = function() return value end, set = function(_, v)
             value = v
             if dirty ~= nil then inst:PushEvent(dirty) end
+        end, set_initial = function(_, v)
+            -- Engine construction deserialization does not emit a dirty event.
+            value = v
         end }
     end
     net_bool, net_float, net_entity = net, net, net
     package.loaded["prefabs/automatic_collector"] = nil
     local prefab, advanced = assert(loadfile(TEST_ROOT .. "/scripts/prefabs/automatic_collector.lua"))()
     package.loaded["prefabs/automatic_collector"] = prefab
-    return prefab, function(value) seed = value end, native_locomotor, advanced
+    local function run_static_tasks()
+        local tasks = static_tasks
+        static_tasks = {}
+        for _, task in ipairs(tasks) do
+            if not task.cancelled and task.inst:IsValid() then task.fn(task.inst) end
+        end
+    end
+    return prefab, function(value) seed = value end, native_locomotor, advanced, run_static_tasks
 end
 
 function scenarios.collector_distinct_prefabs()
@@ -482,6 +502,46 @@ function scenarios.collector_prefab_native_save_load()
             local downgraded = SpawnSaveRecord(legacy:GetSaveRecord())
             assert(downgraded.prefab == base.name and downgraded:GetBasicDisplayName() == "拾荒机")
         end
+    end
+end
+
+function scenarios.collector_native_rejoin(prefab_name, initial_phase, advanced_value)
+    local base, _, _, advanced, run_static_tasks = prefab_runtime()
+    Prefabs = { [base.name] = base, [advanced.name] = advanced }
+    Ents, modprefabinitfns, REPLICATABLE_COMPONENTS = {}, {}, {}
+    ModManager = { GetPostInitFns = function() return {} end }
+    TheWorld.ismastersim = false
+    TheWorld.PushEvent = function() end
+    TheSim.SpawnPrefab = function(_, name) return SpawnPrefabFromSim(name) end
+    for join = 1, 3 do
+        local client = NativeSpawnPrefab(prefab_name)
+        assert(next(client.components) == nil)
+        if join == 2 then client.name = "仓库一号" end
+        local function deserialize()
+            client._ac_mk2:set_initial(advanced_value)
+            local name = advanced_value and advanced.name or base.name
+            -- AnimState is also replicated by the engine, independently of Lua identity.
+            client.AnimState:SetBank(name)
+            client.AnimState:SetBuild(name)
+        end
+        if initial_phase == "before_replication" then deserialize() end
+        client:ReplicateEntity()
+        if initial_phase == "after_replication" then deserialize() end
+        run_static_tasks()
+        local expected = advanced_value and advanced.name or base.name
+        assert(client.prefab == expected and client.native_prefab == expected,
+            "Rejoining without an initial dirty event must restore the authoritative prefab")
+        assert(client.bank == expected and client.build == expected)
+        assert(client.mapicon == expected .. ".tex" and client.Physics:GetRadius() == .25)
+        assert(client:GetBasicDisplayName() == (join == 2 and "仓库一号"
+            or advanced_value and "采集车" or "拾荒机"))
+        assert(Upgrades.IsAdvanced(client) == advanced_value and next(client.components) == nil)
+        -- Later live upgrades/downgrades must continue to use the dirty listener.
+        client._ac_mk2:set(not advanced_value)
+        assert(client.prefab == (advanced_value and base.name or advanced.name))
+        run_static_tasks()
+        assert(Upgrades.IsAdvanced(client) == not advanced_value)
+        client:Remove()
     end
 end
 
