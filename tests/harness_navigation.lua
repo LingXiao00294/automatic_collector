@@ -180,8 +180,8 @@ local function begin(w, before, wait_for_search)
     return action
 end
 
-local function tick(w, frozen, before)
-    time = time + FRAMES
+local function tick(w, frozen, before, same_frame)
+    if not same_frame then time = time + FRAMES end
     if before ~= nil then before() end
     local inst, loco = w.inst, w.inst.components.locomotor
     loco:OnUpdate(FRAMES)
@@ -303,6 +303,471 @@ function scenarios.navigation_narrow_closed_corridor()
     assert(w:GetCargo().components.stackable:StackSize() == 7)
 end
 
+local function winding_corridor(inside, startx, startz, radius)
+    -- Unit-spaced, radius-.5 walls leave a one-unit passage with several turns.
+    -- The outside start offsets both grids and leaves a large open search area.
+    local rows = {
+        "#.#######",
+        "#.#######",
+        "#.#######",
+        "#.......#",
+        "#######.#",
+        "#######.#",
+        "#.......#",
+        "#.#######",
+        "#.#######",
+        "#########",
+    }
+    for z, row in ipairs(rows) do
+        for x = 1, #row do
+            if row:sub(x,x) == "#" then blocker(x-1,z-1,.5) end
+        end
+    end
+    local w = H.worker(startx or 5.375) w.radius = radius or 20
+    w.inst.z = startz or -2.625 w:SetHome()
+    if inside then w.inst.x,w.inst.z = 1,.125 end
+    local loco = prepare(w)
+    local c = physics(H.chest(1),.3,OBSTACLES,CHARACTERS) c.z = 8
+    local cargo = H.item("rocks",w.inst.x,nil,7)
+    w.inst.components.inventory:GiveItem(cargo)
+    return w,loco,c,cargo
+end
+
+function scenarios.navigation_winding_corridor_outside(startx, startz, radius)
+    local w,loco,c = winding_corridor(false,startx,startz,radius)
+    local action = begin(w)
+    assert(loco.dest ~= nil, "An outside cart must find the entrance to a winding narrow corridor")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_winding_corridor_inside()
+    local w,loco,c = winding_corridor(true)
+    local action = begin(w)
+    assert(loco.dest ~= nil, "The same winding corridor must remain traversable from its entrance")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_winding_corridor_after_pickup()
+    local w,loco,c,cargo = winding_corridor(false)
+    w.inst.components.inventory:RemoveItem(cargo)
+    cargo.Transform:SetPosition(w.inst.x+.25,0,w.inst.z)
+    local pickup = begin(w)
+    assert(pickup.action == ACTIONS.PICKUP and pickup.target == cargo and w.inst.buffered == pickup)
+    assert(w:ValidateAction(pickup)) w:PerformAction(pickup)
+    assert(w:GetCargo() == cargo and w.inst.z < 0)
+    local action = begin(w)
+    assert(action.target == c and loco.dest ~= nil,
+        "Finishing an outdoor pickup must not prevent entry for the next delivery")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7 and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.navigation_winding_corridor_reopens()
+    local w,loco,c,cargo = winding_corridor(false)
+    local wall = blocker(1,0,.5)
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and w:IsCoolingDown(c))
+    w.nextscan = 0
+    assert(w:GetNextAction(false) == nil and w.blocked and w:GetCargo() == cargo,
+        "A genuinely closed entrance must retain the cargo and wait")
+    assert(w.inst.components.inventory.drops == nil and cargo.components.stackable:StackSize() == 7)
+    wall:Remove()
+    time = w.cooldowns[c]+.01
+    deliver(w,begin(w))
+    assert(c.components.container.stored.rocks == 7 and not w.blocked)
+end
+
+function scenarios.navigation_winding_corridor_outside_range()
+    local w,loco,c,cargo = winding_corridor(false)
+    w.inst.x,w.inst.z = 5.375,8 w:SetHome()
+    w.inst.x,w.inst.z,w.radius = 10.375,3.125,8
+    local action = begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(action.target == c and w.pending == nil and w:IsCoolingDown(c),
+        "A chest inside the work circle must stay unreachable when its only entrance is outside")
+    assert(w:GetCargo() == cargo and w.inst.x == 10.375 and w.inst.z == 3.125)
+end
+
+function scenarios.navigation_winding_corridor_shared_budget()
+    local w,loco = winding_corridor(false)
+    local cars = { {worker=w,loco=loco} }
+    for _ = 2, 8 do
+        local peer = H.worker(w.inst.x) peer.radius = w.radius peer.inst.z = w.inst.z peer:SetHome()
+        local peer_loco = prepare(peer)
+        peer.inst.components.inventory:GiveItem(H.item("rocks",peer.inst.x,nil,7))
+        table.insert(cars,{worker=peer,loco=peer_loco})
+    end
+    local clear = TheWorld.Pathfinder.IsClear
+    local calls, maximum, tick_id, started = 0, 0, GetTick(), time
+    TheWorld.Pathfinder.IsClear = function(self, ...)
+        if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
+        calls = calls + 1 maximum = math.max(maximum,calls)
+        assert(calls <= 1200, "Local refinement must share the frame budget across outdoor carts")
+        return clear(self, ...)
+    end
+    for _, car in ipairs(cars) do begin(car.worker,nil,false) end
+    local completed, delivery = 0, nil
+    for _ = 1, 550 do
+        time = time+FRAMES
+        for _, car in ipairs(cars) do
+            if not car.done then
+                car.loco:OnUpdate(FRAMES)
+                car.worker:Watchdog()
+                assert(car.worker.pending ~= nil, "Each queued cart must find the winding entrance before timeout")
+                if not car.loco._ac_navigation.searching then
+                    assert(car.loco.path ~= nil and car.worker:GetCargo().components.stackable:StackSize() == 7)
+                    car.done, completed = true, completed+1
+                    if completed == #cars then
+                        delivery = car
+                    else car.worker:Cancel(true) end
+                end
+            end
+        end
+        if completed == #cars then break end
+    end
+    TheWorld.Pathfinder.IsClear = clear
+    assert(completed == 8, "No outdoor cart may exhaust its node budget before reaching the entrance")
+    local search_elapsed = time-started
+    for _, car in ipairs(cars) do
+        if car ~= delivery then car.worker.inst.z = 50 end -- Simulate peers yielding, as in the crowd fixture.
+    end
+    deliver(delivery.worker,delivery.worker.pending.action)
+    assert(time-started < w.config.action_timeout, "Planning plus delivery must fit the existing action timeout")
+    return { maximum=maximum, cars=completed, elapsed=search_elapsed, delivery_elapsed=time-started }
+end
+
+function scenarios.navigation_queue_keeps_progress()
+    local cars, completed, latest_plan = {}, 0, 0
+    for i = 1, 8 do
+        -- Independent work areas isolate global scheduling from cart congestion.
+        local base = i*100
+        local w = H.worker(base-2.375) w.radius, w.inst.z = 20, .125 w:SetHome()
+        local loco = prepare(w)
+        local c = physics(H.chest(base+2.375),.5,OBSTACLES,CHARACTERS) c.z = .125
+        local cargo = H.item("rocks",w.inst.x,nil,7) w.inst.components.inventory:GiveItem(cargo)
+        for z = -17, 17, .75 do blocker(base,z,.5) end
+        for x = -18, -4, 1.8 do
+            for z = -18, 18, 1.8 do if x*x+z*z < 19^2 then blocker(base+x,z,.5) end end
+        end
+        w.Trace = function(_, event)
+            if event == "path_found" then latest_plan = time end
+        end
+        table.insert(cars,{worker=w,loco=loco,chest=c,cargo=cargo})
+    end
+    for _, car in ipairs(cars) do car.action = begin(car.worker,nil,false) end
+    local waited_past_deadline = false
+    for frame = 1, 1800 do
+        time = time+FRAMES
+        for _, car in ipairs(cars) do
+            if not car.done then
+                tick(car.worker,false,nil,true)
+                if frame%3 == 0 then car.worker:Watchdog() end
+                assert(car.worker.pending ~= nil, "Queued search progress must survive the old total deadline")
+                waited_past_deadline = waited_past_deadline or (time > 20 and car.loco._ac_navigation ~= nil
+                    and car.loco._ac_navigation.searching)
+                if car.worker.inst.buffered == car.action then
+                    assert(car.worker:ValidateAction(car.action) and car.worker:CanInteract(car.action))
+                    car.worker:PerformAction(car.action)
+                    assert(car.chest.components.container.stored.rocks == 7 and car.worker:GetCargo() == nil)
+                    assert(car.worker.inst.components.inventory.drops == nil)
+                    car.done, completed = true, completed+1
+                end
+            end
+        end
+        if completed == #cars then break end
+    end
+    assert(waited_past_deadline and completed == #cars,
+        "All eight independent carts must finish planning and deliver, without cancelling peers")
+    return { cars=completed, planned=latest_plan, elapsed=time }
+end
+
+local function long_route_worker()
+    local w = H.worker(7) w.radius = 20 w:SetHome()
+    w.inst.x,w.inst.z = -1,-7.5
+    local loco = prepare(w)
+    local c = H.chest(15) c.z = -7.5
+    local cargo = H.item("rocks",-1,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    for x = 0, 14, 2 do
+        local low,high = -8,8
+        if x%4 == 0 then high = 6 else low = -6 end
+        for z = low, high, .75 do blocker(x,z,.45) end
+    end
+    ground = function(x,z) return x >= -2 and x <= 16 and z >= -8.5 and z <= 8.5 end
+    return w,loco,c,cargo,begin(w,nil,false)
+end
+
+function scenarios.navigation_long_walking_progress()
+    local w,loco,c,cargo,action = long_route_worker()
+    for frame = 1, 1500 do
+        tick(w)
+        if frame%3 == 0 then w:Watchdog() end
+        assert(w.pending ~= nil, "Continuous walking progress must survive the old total deadline")
+        if w.inst.buffered == action then break end
+    end
+    assert(time > 20 and w.inst.buffered == action and loco._ac_navigation == nil)
+    local state = H.enter(w,action,"store")
+    time = time+.2 w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and w:GetCargo() == nil and c.components.container.stored.rocks == 7)
+    assert(cargo.components.inventoryitem.owner == c and w.inst.components.inventory.drops == nil)
+    return { elapsed=time, stored=c.components.container.stored.rocks }
+end
+
+function scenarios.navigation_long_navigation_target_changes()
+    local w,loco,c,cargo,action = long_route_worker()
+    while time < 20.5 do
+        tick(w) w:Watchdog()
+        assert(w.pending ~= nil, "Long valid navigation must stay active before the receiver changes")
+    end
+    assert(loco.dest ~= nil)
+    c.components.container.capacity = 0
+    action:Fail() -- Native failure may precede the next semantic watchdog check.
+    assert(w.pending == nil and not w:IsCoolingDown(c) and w:GetCargo() == cargo,
+        "Expired original start time must not misclassify a late capacity change as navigation failure")
+end
+
+function scenarios.navigation_search_no_progress_timeout()
+    local w = H.worker() local loco = prepare(w) local c = H.chest(8)
+    local cargo = H.item("rocks",0,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    ground = function(x) return x < 3 or x > 4 end
+    local action = begin(w,nil,false)
+    assert(loco._ac_navigation.searching)
+    local failures = 0 action:AddFailAction(function() failures = failures+1 end)
+    -- No locomotor updates: a lost/stalled scheduler must still release the job.
+    time = time+21 w:Watchdog() w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "search_timeout" and failures == 1)
+    assert(w:GetNextAction(false) == nil and w.blocked and w:GetCargo() == cargo)
+    assert(w:IsWaitingForRoute(c) and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.navigation_walk_no_progress_timeout()
+    local w = H.worker() prepare(w) local c = H.chest(8)
+    local cargo = H.item("rocks",0,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    local action = begin(w)
+    local failures = 0 action:AddFailAction(function() failures = failures+1 end)
+    time = time+21 w:Watchdog() w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "navigation_timeout" and failures == 1)
+    assert(w:GetNextAction(false) == nil and w:IsWaitingForRoute(c) and w:GetCargo() == cargo)
+    assert(w.inst.components.inventory.drops == nil)
+    c.components.container.capacity = 0
+    time = time+1 w:GetNextAction(false)
+    assert(w:GetCargo() == nil and #w.inst.components.inventory.drops == 1)
+    assert(w.inst.components.inventory.drops[1].item == cargo and cargo.components.stackable:StackSize() == 7)
+end
+
+function scenarios.navigation_timeout_contact_phase()
+    local w = H.worker() local loco = prepare(w) local c = H.chest(.3)
+    w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+    local action = begin(w)
+    assert(loco._ac_navigation == nil and w.inst.buffered == action)
+    time = time+19
+    H.enter(w,action,"store")
+    function w.inst.sg:HasStateTag(tag)
+        for _, value in ipairs(self.currentstate.tags or {}) do if value == tag then return true end end
+        return false
+    end
+    time = time+19 w:Watchdog()
+    assert(w.pending ~= nil, "Work animation must receive its own timeout window after navigation")
+    time = time+2 w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "timeout" and not w:IsWaitingForRoute(c),
+        "A stalled interaction is not a navigation failure and must still time out")
+end
+
+function scenarios.navigation_timeout_cancelled_progress()
+    local w = H.worker() prepare(w) H.chest(8)
+    w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+    local old = begin(w)
+    w:Cancel(true)
+    local current = w:GetNextAction()
+    assert(current ~= nil and current ~= old)
+    time = time+19 w:RecordActionProgress(old)
+    time = time+2 w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "timeout",
+        "A cancelled action must not extend the replacement action's deadline")
+end
+
+function scenarios.navigation_subgrid_circular_elbow(startz, angle)
+    angle = angle or 0
+    local function rotate(x,z)
+        return x*math.cos(angle)-z*math.sin(angle), x*math.sin(angle)+z*math.cos(angle)
+    end
+    local w = H.worker() w.inst.x,w.inst.z = rotate(-2.25,startz or 0) w:SetHome()
+    local loco = prepare(w)
+    local c = H.chest(5) c.x,c.z = rotate(5,4.5)
+    local added = {}
+    local function add(x,z)
+        local key = string.format("%.6f:%.6f",x,z)
+        if not added[key] then
+            added[key] = true
+            local px,pz = rotate(x,z) blocker(px,pz,.5)
+        end
+    end
+    for i = 0, 5 do add(5.9*i/5,-.775) end
+    for i = 0, 4 do add(4.1*i/4,1.025) end
+    for i = 0, 6 do add(5.9,-.775+i) end
+    for i = 0, 4 do add(4.1,1.025+4.2*i/4) end
+    add(5,6.1)
+    w.inst.components.inventory:GiveItem(H.item("rocks",w.inst.x,nil,7))
+    local action = begin(w)
+    assert(loco.dest ~= nil, "A .8-unit L-shaped gap must be found independently of the start's grid phase")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_terrain_narrow_elbow()
+    local w = H.worker() prepare(w)
+    local c = H.chest(4.5) c.z = 6
+    ground = function(x,z)
+        return x < 2 or (x <= 4.9 and z >= -.15 and z <= .65)
+            or (x >= 4.1 and x <= 4.9 and z >= -.15)
+    end
+    w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+    deliver(w,begin(w))
+    assert(c.components.container.stored.rocks == 7,
+        "Terrain-only narrow turns must not depend on an unrelated static entity enabling refinement")
+end
+
+function scenarios.navigation_index_large_obstacle()
+    local w = H.worker(-6) w.inst.z = -6 w.radius = 20 w:SetHome()
+    local loco = prepare(w) local c = H.chest(6) c.z = 6
+    blocker(1,-1,3)
+    w.inst.components.inventory:GiveItem(H.item("rocks",-6,nil,7))
+    local action = begin(w)
+    assert(loco.path ~= nil and #loco.path.steps > 3,
+        "Diagonal cell traversal must include a large body whose centre is outside the crossed cells")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_small_target_displacement()
+    local w = H.worker(0,false) local loco = prepare(w) H.chest(-2)
+    local target = H.item("twigs",2,nil,1)
+    local plans, stationary = 0, 0
+    w.Trace = function(_, event)
+        if event == "path_found" then plans = plans+1 target.x = target.x+.2 end
+    end
+    local action = begin(w)
+    for _ = 1, 90 do
+        local x,z = w.inst.x,w.inst.z
+        tick(w)
+        if loco.dest == nil then break end
+        if x == w.inst.x and z == w.inst.z then stationary = stationary+FRAMES end
+    end
+    assert(w.inst.buffered == action and plans == 1 and stationary < .1,
+        "The final approach must follow a .2-unit target displacement without stopping or replanning")
+    assert(w.last_failure == nil and not w:IsCoolingDown(target))
+end
+
+function scenarios.navigation_contact_conditions(change, kind)
+    local w = H.worker(0,false) local loco = prepare(w)
+    local target, cargo
+    if kind == "store" then
+        target = physics(H.chest(.6),.3,OBSTACLES,CHARACTERS)
+        cargo = H.item("rocks",0,nil,7) w.inst.components.inventory:GiveItem(cargo)
+        cargo.replica = {inventoryitem={IsHeldBy=function(_, owner)
+            return cargo.components.inventoryitem.owner == owner
+        end}}
+    else
+        H.chest(-1) target = H.item("twigs",.8,nil,7)
+        -- Execute the installed native BufferedAction and PICKUP callback.
+        function w.inst:PerformBufferedAction()
+            local action = self.buffered self.buffered = nil
+            return action:Do()
+        end
+    end
+    local action = begin(w)
+    assert(w.inst.buffered == action and loco._ac_navigation == nil)
+    local failures = 0 action:AddFailAction(function() failures = failures+1 end)
+    local state = H.enter(w,action,kind == "store" and "store" or "pickup")
+    if change == "target" then target.x = 10
+    elseif change == "cart" then w.inst.x = -8
+    elseif change == "wall" then blocker(target.x/2,0,.15)
+    elseif change == "water" then ground = function(x) return x < .25 or x > .45 end
+    elseif change == "character" then blocker(target.x,0,.4,CHARACTERS,CHARACTERS) end
+    w.inst.sg.timeinstate = 1 state.onupdate(w.inst)
+    local permitted = change == "none" or change == "character"
+    if permitted then
+        assert(failures == 0 and w.pending == nil)
+        assert(kind == "store" and target.components.container.stored.rocks == 7 or w:GetCargo() == target)
+    else
+        assert(failures == 1 and w.pending == nil and not w:IsCoolingDown(target),
+            "Changed contact geometry must cancel once and permit a new approach")
+        assert(w:GetCargo() == cargo and w.inst.components.inventory.drops == nil)
+        if kind ~= "store" then
+            assert(target.components.inventoryitem.owner == nil and target.components.stackable:StackSize() == 7)
+        end
+    end
+end
+
+function scenarios.navigation_dense_obstacle_budget(population, detour)
+    local reads, collisions, scans = {}, {}, {}
+    for i = 1, population do
+        local row = math.floor((i-1)/19)
+        local obstacle = blocker(((i-1)%19)-9,(3+math.floor(row/2))*(row%2 == 0 and 1 or -1),.49)
+        local active = obstacle.Physics.IsActive
+        obstacle.Physics.IsActive = function(self)
+            reads[GetTick()] = (reads[GetTick()] or 0)+1
+            return active(self)
+        end
+    end
+    local c = H.chest(8) local cars = {}
+    function c:GetPhysicsRadius(default) return default end
+    if detour then ground = function(x) return x < 3.5 or x > 4.5 end end
+    for _ = 1, 8 do
+        local w = H.worker() local loco = prepare(w)
+        w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,1))
+        local action = w:GetNextAction()
+        assert(action.target == c)
+        table.insert(cars,{worker=w,loco=loco,action=action})
+    end
+    local function upvalue(fn, key)
+        for i = 1, 100 do
+            local name, value = debug.getupvalue(fn,i)
+            if name == key then return value,i end
+            if name == nil then break end
+        end
+        error("Missing navigation helper: " .. key)
+    end
+    local segment = upvalue(upvalue(upvalue(cars[1].loco.FindPath,"Plan"),"Approach"),"SegmentClear")
+    local distance, index = upvalue(segment,"SegmentDistanceSq")
+    local find = TheSim.FindEntities
+    debug.setupvalue(segment,index,function(...)
+        collisions[GetTick()] = (collisions[GetTick()] or 0)+1
+        return distance(...)
+    end)
+    TheSim.FindEntities = function(self, ...)
+        scans[GetTick()] = (scans[GetTick()] or 0)+1
+        return find(self, ...)
+    end
+    for _, car in ipairs(cars) do car.loco:GoToEntity(c,car.action,false) end
+    local completed, frames = 0, 0
+    for frame = 1, 590 do
+        for _, car in ipairs(cars) do
+            if not car.done then
+                if car.loco.dest ~= nil then car.loco:OnUpdate(FRAMES) end
+                local state = car.loco._ac_navigation
+                if state == nil or not state.searching then
+                    car.worker:Cancel(true) car.done, completed = true, completed+1
+                end
+            end
+        end
+        frames = frame
+        if completed == #cars then break end
+        time = time+FRAMES
+    end
+    debug.setupvalue(segment,index,distance)
+    TheSim.FindEntities = find
+    assert(completed == #cars, "All dense-scene plans must complete before the existing 20-second action timeout")
+    local function maximum(values)
+        local result = 0
+        for _, value in pairs(values) do result = math.max(result,value) end
+        return result
+    end
+    return {reads=maximum(reads),collisions=maximum(collisions),scans=maximum(scans),frames=frames}
+end
+
 local function moonbase_tile()
     -- A 4x4 tile, walls immediately outside its boundary, and the native
     -- moonbase's radius-1 body at its centre. Start between coarse grid lines.
@@ -334,7 +799,7 @@ function scenarios.navigation_moonbase_shared_refinement()
     TheWorld.Pathfinder.IsClear = function(self, ...)
         if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
         calls = calls + 1 maximum = math.max(maximum,calls)
-        assert(calls <= 1200, "Fine-grid fallback must share the same frame budget across all carts")
+        assert(calls <= 1200, "Local refinement must share the same frame budget across all carts")
         return clear(self, ...)
     end
     for _ = 1, 8 do
@@ -513,9 +978,16 @@ function scenarios.navigation_enclosed_cargo_conservation()
     for _, car in ipairs(cars) do car.worker.inst.z = 3 end
     for _, car in ipairs(cars) do
         local w = car.worker
+        -- Opening the wall can happen during a budgeted retry snapshot/search.
+        -- Let that existing job finish before asking the worker for a new one.
+        for _ = 1, 2000 do
+            local navigation = car.loco._ac_navigation
+            if navigation == nil or not navigation.searching then break end
+            time = time+FRAMES car.loco:OnUpdate(FRAMES)
+        end
         time = math.max(time + .3, (w.cooldowns[c] or 0) + .01)
         w.inst.z = 0 -- The other carts yield through native physics in game.
-        deliver(w,begin(w))
+        deliver(w,w.pending ~= nil and w.pending.action or begin(w))
         w.inst.z = 3
         assert(w:GetCargo() == nil and w.inst.components.inventory.drops == nil)
     end
@@ -859,6 +1331,39 @@ function scenarios.navigation_boat_stuck()
         end)
     end
     assert(w.pending == nil and loco.dest == nil and w:GetCargo() == cargo and w:IsCoolingDown(c))
+end
+
+function scenarios.navigation_snapshot_boat_lifecycle(change)
+    local w,loco,boat,c,obstacle,cargo = boat_worker()
+    for _ = 1, 20000 do H.entity("decoration",boat.x).z = boat.z end
+    local action = begin(w,nil,false)
+    assert(loco._ac_navigation.searching and loco._ac_navigation.context ~= nil,
+        "Entity filtering in the initial snapshot must yield before planning")
+    if change == "remove" then
+        boat:Remove()
+        boat.entity.LocalToWorldSpace = function() error("No snapshot may resume on a removed platform") end
+        boat.entity.WorldToLocalSpace = boat.entity.LocalToWorldSpace
+        tick(w,true)
+        assert(w.pending == nil and loco.dest == nil and w:GetCargo() == cargo)
+    elseif change == "cancel" then
+        w:Cancel(true) w.inst.held = true
+        ground = function() return true end
+        local peer = H.worker(-50) prepare(peer) H.chest(-45)
+        peer.inst.components.inventory:GiveItem(H.item("twigs",-50,nil,1))
+        deliver(peer,begin(peer))
+        assert(w.pending == nil and loco.dest == nil and loco._ac_navigation == nil and w:GetCargo() == cargo)
+    else
+        local points = {}
+        for _, ent in ipairs({w.inst,c,obstacle}) do
+            table.insert(points,{ent=ent,point=Vector3(boat.entity:WorldToLocalSpace(ent:GetPosition():Get()))})
+        end
+        boat.x,boat.z,boat.angle = boat.x+40,boat.z+8,boat.angle+.3
+        for _, entry in ipairs(points) do
+            entry.ent.x,_,entry.ent.z = boat.entity:LocalToWorldSpace(entry.point:Get())
+        end
+        deliver(w,action)
+        assert(c.components.container.stored.rocks == 7)
+    end
 end
 
 local function queued_boat_worker()
@@ -1406,7 +1911,7 @@ function scenarios.navigation_native_queued_search_lifecycle()
         w.inst.components.inventory:GiveItem(H.item("rocks",-4,nil,7))
         table.insert(scenes,dispatch_scene(w))
     end
-    for _ = 1, 180 do
+    for _ = 1, 540 do
         scene_tick(scenes[1])
         for i, scene in ipairs(scenes) do
             if i > 1 and scene.loco.isupdating then scene.loco:OnUpdate(FRAMES) end
@@ -1419,6 +1924,9 @@ function scenarios.navigation_native_queued_search_lifecycle()
                     "Pausing navigation must not cancel the native action as a generic failure")
             end
         end
+        local completed = true
+        for _, scene in ipairs(scenes) do completed = completed and scene.worker.last_failure ~= nil end
+        if completed then break end
     end
     assert(waiting, "Native dispatch must exercise the shared search queue")
     for _, scene in ipairs(scenes) do
@@ -1498,7 +2006,10 @@ function scenarios.navigation_native_blocked_return_dispatch()
     local scene = dispatch_scene(w)
     w.inst.x = 6
     ground = function(x,z) return x < 2.5 or x > 3.5 or math.abs(z) > 30 end
-    for _ = 1, 5 do scene_tick(scene) end
+    for _ = 1, 120 do
+        scene_tick(scene)
+        if #scene.actions == 1 and scene.loco.dest == nil then break end
+    end
     assert(#scene.actions == 1 and w.pending == nil and scene.loco.dest == nil)
     for _ = 1, 6 do scene_tick(scene) end
     assert(#scene.actions == 1, "Unreachable home must retain the return retry throttle")
@@ -1633,8 +2144,7 @@ function scenarios.navigation_fast_job_dispatch()
     local target = H.item("rocks",4,nil,7)
     local brain, actions = dispatch_brain(w)
     local pickup = dispatch_by(brain,actions,1,time+.1)
-    local loco = w.inst.components.locomotor
-    loco.bufferedaction = nil loco:Stop() loco:Clear()
+    assert(arrive(w) == pickup)
     w:SetActionSpeed(4)
     local state = H.enter(w,pickup,"pickup")
     function w.inst.sg:HasStateTag(tag)

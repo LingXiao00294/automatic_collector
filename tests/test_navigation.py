@@ -17,6 +17,15 @@ SCENARIOS = [
     "navigation_narrow_offset_corridor",
     "navigation_narrow_wall_path_tiles",
     "navigation_narrow_closed_corridor",
+    "navigation_winding_corridor_outside",
+    "navigation_winding_corridor_inside",
+    "navigation_winding_corridor_after_pickup",
+    "navigation_winding_corridor_reopens",
+    "navigation_winding_corridor_outside_range",
+    "navigation_winding_corridor_shared_budget",
+    "navigation_small_target_displacement",
+    "navigation_terrain_narrow_elbow",
+    "navigation_index_large_obstacle",
     "navigation_moonbase_walled_tile",
     "navigation_moonbase_shared_refinement",
     "navigation_chest_approach",
@@ -182,6 +191,77 @@ def test_prefab_and_navigation_with_engine_global_bit(runtime_module):
 
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_navigation_scenario(navigation, scenario):
+    navigation.globals().scenarios[scenario]()
+
+
+@pytest.mark.parametrize("radius", [12, 20])
+@pytest.mark.parametrize("start", [(5.375, -2.625), (5.01, -2.4), (10.375, 3.125), (2.125, -1.625)])
+def test_winding_corridor_start_offsets(navigation, radius, start):
+    navigation.globals().scenarios.navigation_winding_corridor_outside(*start, radius)
+
+
+@pytest.mark.parametrize("startz", [0, 0.04, 0.125, 0.21])
+@pytest.mark.parametrize("angle", [0, 0.37])
+def test_subgrid_circular_elbow(navigation, startz, angle):
+    navigation.globals().scenarios.navigation_subgrid_circular_elbow(startz, angle)
+
+
+@pytest.mark.parametrize("change", ["move", "remove", "cancel"])
+def test_snapshot_boat_lifecycle(navigation, change):
+    navigation.globals().scenarios.navigation_snapshot_boat_lifecycle(change)
+
+
+@pytest.mark.parametrize("kind", ["pickup", "store"])
+@pytest.mark.parametrize("change", ["none", "character", "target", "cart", "wall", "water"])
+def test_contact_conditions(navigation, kind, change):
+    with ZipFile(native_bundle()) as archive:
+        navigation.execute(archive.read("scripts/bufferedaction.lua").decode("utf-8"))
+        source = archive.read("scripts/actions.lua").decode("utf-8")
+    start = source.index("ACTIONS.PICKUP.fn = function(act)")
+    end = source.index("\nACTIONS.EMPTY_CONTAINER.fn", start)
+    navigation.execute(source[start:end])
+    navigation.globals().scenarios.navigation_contact_conditions(change, kind)
+
+
+@pytest.mark.parametrize("population", [120, 300])
+@pytest.mark.parametrize("detour", [False, True])
+def test_dense_obstacle_budget(navigation, population, detour):
+    result = navigation.globals().scenarios.navigation_dense_obstacle_budget(population, detour)
+    assert result.scans <= 4, "Initial and completion snapshots must share the query-start limit"
+    assert result.reads <= 4096, (
+        "Snapshot entity processing must yield within the shared work budget"
+    )
+    assert result.collisions <= 4608, (
+        "Detailed collision checks must be budgeted, not only A* nodes"
+    )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "navigation_queue_keeps_progress",
+        "navigation_long_walking_progress",
+        "navigation_long_navigation_target_changes",
+        "navigation_search_no_progress_timeout",
+        "navigation_walk_no_progress_timeout",
+        "navigation_timeout_contact_phase",
+        "navigation_timeout_cancelled_progress",
+    ],
+)
+def test_navigation_progress_deadlines(navigation, scenario):
+    with ZipFile(native_bundle()) as archive:
+        navigation.execute(archive.read("scripts/bufferedaction.lua").decode("utf-8"))
+    navigation.execute("""
+        ACTIONS.STORE.distance = nil
+        local original_item = upgrade_contract.item
+        upgrade_contract.item = function(...)
+            local item = original_item(...)
+            item.replica = { inventoryitem = { IsHeldBy = function(_, owner)
+                return item.components.inventoryitem.owner == owner
+            end } }
+            return item
+        end
+    """)
     navigation.globals().scenarios[scenario]()
 
 

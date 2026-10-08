@@ -36,6 +36,8 @@ local function WorkState(name, animation, duration, impact)
             inst.AnimState:SetDeltaTimeMultiplier(speed)
             inst.AnimState:PlayAnimation(animation)
             inst.sg.statemem.action = inst:GetBufferedAction()
+            -- The work animation has its own deadline after a long trip.
+            inst.components.ac_worker:RecordActionProgress(inst.sg.statemem.action)
             local target = inst.sg.statemem.action ~= nil and inst.sg.statemem.action.target or nil
             if target ~= nil and target:IsValid() then
                 inst:ForceFacePoint(target:GetPosition())
@@ -47,11 +49,12 @@ local function WorkState(name, animation, duration, impact)
             if not inst.sg.statemem.hit and inst.sg.timeinstate >= inst.sg.statemem.impact then
                 inst.sg.statemem.hit = true
                 local worker, action = inst.components.ac_worker, inst.sg.statemem.action
-                if worker:ValidateAction(action) then
+                local valid = worker:ValidateAction(action)
+                if valid and worker:CanInteract(action) then
                     Sounds.Play(inst, name)
                     worker:PerformAction(action)
                 else
-                    worker:FailAction(action, action ~= nil and action.action == ACTIONS.STORE)
+                    worker:FailAction(action, valid or (action ~= nil and action.action == ACTIONS.STORE))
                     inst:ClearBufferedAction()
                 end
             end

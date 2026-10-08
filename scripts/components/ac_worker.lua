@@ -7,7 +7,7 @@ local PATH_RETRY_DELAY = .5
 -- Only a plan that found no route at all. A stuck or displaced car already
 -- re-planned internally, or left the target's platform behind.
 local PATH_FAILURES = { unreachable = true }
-local NAVIGATION_FAILURES = { unreachable = true, stuck = true, search_timeout = true }
+local NAVIGATION_FAILURES = { unreachable = true, stuck = true, search_timeout = true, navigation_timeout = true }
 
 local Worker = Class(function(self, inst)
     self.inst = inst
@@ -224,6 +224,19 @@ function Worker:IsWorking()
         and not self.inst:IsInLimbo() and not self.inst:IsAsleep()
 end
 
+function Worker:RecordActionProgress(action)
+    -- Only the owning action may renew its deadline; cancelled navigation and
+    -- stale animation callbacks cannot keep a replacement job alive.
+    if self.pending ~= nil and self.pending.action == action then
+        self.pending.last_progress = GetTime()
+    end
+end
+
+function Worker:IsActionTimedOut()
+    return self.pending ~= nil
+        and GetTime() - (self.pending.last_progress or self.pending.started) > self.config.action_timeout
+end
+
 function Worker:SetBlocked(value)
     self.blocked = value
     self.inst._ac_blocked:set(value)
@@ -236,7 +249,7 @@ function Worker:Finish(action, success)
     -- Native locomotor may fail first, before the watchdog sees a changed target.
     -- Classify here without failing/clearing the action again inside its callback.
     if not success and not self.pending.replan and not self.pending.executing and self:IsWorking()
-        and GetTime() - self.pending.started <= self.config.action_timeout
+        and not self:IsActionTimedOut()
         and not self:ValidateAction(action) then
         self.pending.replan = true
         self.nextscan = 0
@@ -376,11 +389,23 @@ function Worker:ValidateAction(action)
     return self:CanHarvest(action.target, kind)
 end
 
+function Worker:CanInteract(action)
+    local locomotor = self.inst.components.locomotor
+    local arrive = action.arrivedist or locomotor.arrive_dist
+    -- Use the distance selected by native GoToEntity, including action and body
+    -- radii. Semantic validation while walking must not apply this contact gate.
+    if arrive ~= nil and self.inst:GetDistanceSqToInst(action.target) > arrive ^ 2 + .000001 then
+        return false
+    end
+    return locomotor.ac_can_interact == nil or locomotor:ac_can_interact(action.target)
+end
+
 function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
-        or GetTime() - self.pending.started > self.config.action_timeout) then
+        or self:IsActionTimedOut()) then
         local navigation = self.inst.components.locomotor._ac_navigation
-        local reason = navigation ~= nil and navigation.searching and "search_timeout" or "timeout"
+        local reason = navigation ~= nil
+            and (navigation.searching and "search_timeout" or "navigation_timeout") or "timeout"
         self:Cancel(false, self:IsWorking() and reason or "inactive")
     elseif self.pending ~= nil and not self:ValidateAction(self.pending.action) then
         -- Targets can be picked, harvested or removed while we are still walking.
