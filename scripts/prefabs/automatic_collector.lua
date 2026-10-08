@@ -68,7 +68,8 @@ local function fn(advanced)
     inst._ac_radius:set(TUNING.AUTOMATIC_COLLECTOR.radius)
     inst._ac_enabled:set(true)
     inst._ac_harvest_enabled:set(true)
-    if TheWorld.ismastersim then inst._ac_mk2:set(advanced) end
+    -- Both peers must use the same prefab defaults before SetPristine.
+    inst._ac_mk2:set(advanced)
     inst.entity:SetPristine()
     Upgrades.RefreshVisual(inst)
     if not TheWorld.ismastersim then

@@ -334,9 +334,10 @@ function scenarios.harvest_toggle_upgrade_and_load_order()
     assert(legacy_base.farm_count == 3 and legacy_base.farm_draining)
 end
 
-local function prefab_runtime(stack_post_init)
+local function prefab_runtime(stack_post_init, defer_tasks)
     local current, seed
-    local static_tasks = {}
+    local static_tasks, simulation_tasks = {}, {}
+    local next_guid = 0
     local native_locomotor = {
         SetTriggersCreep = function() end,
         FindPath = function(self) self.native_paths = (self.native_paths or 0) + 1 end,
@@ -352,7 +353,8 @@ local function prefab_runtime(stack_post_init)
         local inst = H.entity("automatic_collector")
         current = inst
         visuals(inst)
-        inst.GUID = #inst.events + 1
+        next_guid = next_guid + 1
+        inst.GUID = next_guid
         inst.entity = {}
         inst.entity.SetPrefabName = function(_, name) inst.native_prefab = name end
         inst.entity.GetGUID = function() return inst.GUID end
@@ -365,6 +367,11 @@ local function prefab_runtime(stack_post_init)
             assert(inst._ac_mk2 ~= nil or inst:HasTag("ac_upgrade_kit"))
             assert(inst._ac_harvest_enabled ~= nil or inst:HasTag("ac_upgrade_kit"))
             assert(next(inst.components) == nil, "No authoritative components before SetPristine")
+            inst.pristine_mk2 = inst._ac_mk2 ~= nil and inst._ac_mk2:value()
+            if seed ~= nil and not TheWorld.ismastersim
+                and inst._ac_mk2 ~= nil and inst._ac_mk2.set_initial ~= nil then
+                inst._ac_mk2:set_initial(seed)
+            end
         end
         inst.Light = { SetRadius = function() end, Enable = function() end }
         inst.DynamicShadow = { SetSize = function() end }
@@ -374,6 +381,15 @@ local function prefab_runtime(stack_post_init)
         function inst:ListenForEvent(event, fn) self.listeners[event] = fn end
         function inst:PushEvent(event, data)
             if self.listeners[event] ~= nil then self.listeners[event](self, data) end
+        end
+        if defer_tasks then
+            function inst:DoTaskInTime(delay, fn)
+                assert(delay == 0)
+                local task = { inst = self, fn = fn }
+                function task:Cancel() self.cancelled = true end
+                table.insert(simulation_tasks, task)
+                return task
+            end
         end
         function inst:DoStaticTaskInTime(delay, fn)
             assert(delay == 0)
@@ -406,11 +422,12 @@ local function prefab_runtime(stack_post_init)
         return inst
     end
     local function net(_, name, dirty)
-        local value = name == "ac.mk2" and seed == true or false
+        local value = false
         local inst = current
         return { value = function() return value end, set = function(_, v)
+            local changed = value ~= v
             value = v
-            if dirty ~= nil then inst:PushEvent(dirty) end
+            if changed and dirty ~= nil then inst:PushEvent(dirty) end
         end, set_initial = function(_, v)
             -- Engine construction deserialization does not emit a dirty event.
             value = v
@@ -427,7 +444,15 @@ local function prefab_runtime(stack_post_init)
             if not task.cancelled and task.inst:IsValid() then task.fn(task.inst) end
         end
     end
-    return prefab, function(value) seed = value end, native_locomotor, advanced, run_static_tasks
+    local function run_simulation_tasks()
+        local tasks = simulation_tasks
+        simulation_tasks = {}
+        for _, task in ipairs(tasks) do
+            if not task.cancelled and task.inst:IsValid() then task.fn(task.inst) end
+        end
+    end
+    return prefab, function(value) seed = value end, native_locomotor, advanced,
+        run_static_tasks, run_simulation_tasks
 end
 
 function scenarios.collector_distinct_prefabs()
@@ -543,6 +568,98 @@ function scenarios.collector_native_rejoin(prefab_name, initial_phase, advanced_
         assert(Upgrades.IsAdvanced(client) == not advanced_value)
         client:Remove()
     end
+end
+
+function scenarios.collector_pristine_reload(origin, initial_phase, harvest_enabled)
+    local callbacks = H.register_modmain()
+    local base, _, _, advanced, run_static_tasks, run_simulation_tasks = prefab_runtime(nil, true)
+    Prefabs = { [base.name] = base, [advanced.name] = advanced }
+    Ents, modprefabinitfns, REPLICATABLE_COMPONENTS = {}, {}, {}
+    ModManager = { GetPostInitFns = function() return {} end }
+    TheWorld.PushEvent = function() end
+    TheSim.SpawnPrefab = function(_, name) return SpawnPrefabFromSim(name) end
+    local upgraded = origin ~= "base"
+    TheWorld.ismastersim = true
+    local host = NativeSpawnPrefab(origin == "direct" and advanced.name or base.name)
+    run_simulation_tasks()
+    local player = H.entity("wilson", 0, { "player" })
+    player.components.inventory = H.inventory(player)
+    player.replica = { inventory = player.components.inventory }
+    local kit = H.item("ac_upgrade_kit", 0, { "ac_upgrade_kit" }, 2)
+    player.components.inventory:GiveItem(kit)
+    local installer = UpgradeItem(kit)
+    if origin == "kit" then
+        assert(installer:Install(player, host))
+        assert(kit.components.stackable:StackSize() == 1)
+    elseif origin == "legacy" then
+        assert(host.components.ac_upgradable:SetLevel(Upgrades.CHASSIS, 1))
+    end
+    host.Transform:SetPosition(1, 0, 2)
+    host.components.ac_worker:SetHome()
+    host.components.ac_worker:SetHarvestEnabled(harvest_enabled)
+    host.components.ac_worker.farm_count, host.components.ac_worker.farm_draining = 3, true
+    host.components.ac_upgradable.levels.unknown_extension = 4
+
+    local function check_pair(server)
+        local name = upgraded and advanced.name or base.name
+        local worker = server.components.ac_worker
+        assert(server.prefab == name and server.native_prefab == name)
+        assert(server.components.ac_upgradable:GetLevel(Upgrades.CHASSIS) == (upgraded and 1 or 0))
+        assert(Upgrades.IsAdvanced(server) == upgraded)
+        assert(server.components.locomotor.walkspeed == (upgraded and 6 or 3))
+        assert(worker.radius == (upgraded and 20 or 12))
+        assert(worker:IsHarvestEnabled() == (upgraded and harvest_enabled))
+        assert(worker.farm_count == 3 and worker.farm_draining)
+        assert(worker:GetHome().x == 1 and worker:GetHome().z == 2)
+        assert(server.components.ac_upgradable:GetLevel("unknown_extension") == 4)
+        local can_install, reason = installer:CanInstall(player, server)
+        assert(can_install == not upgraded)
+        if upgraded then assert(reason == "ALREADY_UPGRADED") end
+
+        TheWorld.ismastersim = false
+        local client = NativeSpawnPrefab(server.native_prefab)
+        local function deserialize()
+            -- A field unchanged since SetPristine need not be sent again.
+            if server._ac_mk2:value() ~= server.pristine_mk2 then
+                client._ac_mk2:set_initial(server._ac_mk2:value())
+            end
+            client._ac_harvest_enabled:set_initial(server._ac_harvest_enabled:value())
+            client.AnimState:SetBank(server.bank)
+            client.AnimState:SetBuild(server.build)
+        end
+        if initial_phase == "before_replication" then deserialize() end
+        client:ReplicateEntity()
+        if initial_phase == "after_replication" then deserialize() end
+        run_static_tasks()
+        assert(client.prefab == name and client.native_prefab == name,
+            "Reload must preserve the authoritative identity even without a pristine field delta")
+        assert(Upgrades.IsAdvanced(client) == upgraded)
+        assert(client.bank == name and client.build == name and client.mapicon == name .. ".tex")
+        assert(client:GetBasicDisplayName() == (upgraded and "采集车" or "拾荒机"))
+        assert(next(client.components) == nil)
+        local actions = {}
+        callbacks["SCENE:inspectable"](client, player, actions, true)
+        assert(#actions == (upgraded and 1 or 0))
+        if upgraded then assert(actions[1] == ACTIONS.AC_TOGGLE) end
+        return client
+    end
+
+    local client = check_pair(host)
+    TheWorld.ismastersim = true
+    local record = host:GetSaveRecord()
+    if origin == "legacy" then record.prefab = base.name end
+    for reload = 1, 3 do
+        host:Remove() client:Remove()
+        TheWorld.ismastersim = true
+        host = SpawnSaveRecord(record)
+        run_simulation_tasks()
+        client = check_pair(host)
+        record = host:GetSaveRecord()
+        assert(record.prefab == (upgraded and advanced.name or base.name))
+    end
+    Ents = { [host.GUID] = host, [client.GUID] = client }
+    c_removeall(advanced.name)
+    assert(host:IsValid() == not upgraded and client:IsValid() == not upgraded)
 end
 
 function scenarios.collector_native_display_names(ismastersim)

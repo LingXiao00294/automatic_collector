@@ -257,6 +257,9 @@ def native_collector(lua):
         replica_source = (
             scripts.read("scripts/entityreplica.lua").decode("utf-8").replace("\r\n", "\n")
         )
+        console_source = (
+            scripts.read("scripts/consolecommands.lua").decode("utf-8").replace("\r\n", "\n")
+        )
         named_sources = {
             name: scripts.read(f"scripts/{name}.lua").decode("utf-8")
             for name in ("class", "components/named", "components/named_replica")
@@ -287,6 +290,9 @@ def native_collector(lua):
         end = spawn_source.index("\nend", start) + len("\nend")
         lua.execute(spawn_source[start:end], name=f"@native/mainfunctions/{function}.lua")
     lua.globals().NativeSpawnPrefab = lua.globals().SpawnPrefab
+    start = console_source.index("function c_removeall(")
+    end = console_source.index("\nend", start) + len("\nend")
+    lua.execute(console_source[start:end], name="@native/consolecommands/c_removeall.lua")
     start = spawn_source.index("local function ResolveSaveRecordPosition(")
     save_start = spawn_source.index("function SpawnSaveRecord(", start)
     end = spawn_source.index("\nend", save_start) + len("\nend")
@@ -311,6 +317,15 @@ def test_native_collector_prefab_save_load(native_collector):
 def test_native_collector_rejoin(native_collector, prefab_name, initial_phase, advanced_value):
     native_collector.globals().scenarios.collector_native_rejoin(
         prefab_name, initial_phase, advanced_value
+    )
+
+
+@pytest.mark.parametrize("origin", ["legacy", "kit", "direct", "base"])
+@pytest.mark.parametrize("initial_phase", ["before_replication", "after_replication"])
+@pytest.mark.parametrize("harvest_enabled", [False, True], ids=["harvest_off", "harvest_on"])
+def test_native_collector_pristine_reload(native_collector, origin, initial_phase, harvest_enabled):
+    native_collector.globals().scenarios.collector_pristine_reload(
+        origin, initial_phase, harvest_enabled
     )
 
 
