@@ -303,6 +303,134 @@ function scenarios.navigation_narrow_closed_corridor()
     assert(w:GetCargo().components.stackable:StackSize() == 7)
 end
 
+local function winding_corridor(inside, startx, startz, radius)
+    -- Unit-spaced, radius-.5 walls leave a one-unit passage with several turns.
+    -- The outside start offsets both grids and leaves a large open search area.
+    local rows = {
+        "#.#######",
+        "#.#######",
+        "#.#######",
+        "#.......#",
+        "#######.#",
+        "#######.#",
+        "#.......#",
+        "#.#######",
+        "#.#######",
+        "#########",
+    }
+    for z, row in ipairs(rows) do
+        for x = 1, #row do
+            if row:sub(x,x) == "#" then blocker(x-1,z-1,.5) end
+        end
+    end
+    local w = H.worker(startx or 5.375) w.radius = radius or 20
+    w.inst.z = startz or -2.625 w:SetHome()
+    if inside then w.inst.x,w.inst.z = 1,.125 end
+    local loco = prepare(w)
+    local c = physics(H.chest(1),.3,OBSTACLES,CHARACTERS) c.z = 8
+    local cargo = H.item("rocks",w.inst.x,nil,7)
+    w.inst.components.inventory:GiveItem(cargo)
+    return w,loco,c,cargo
+end
+
+function scenarios.navigation_winding_corridor_outside(startx, startz, radius)
+    local w,loco,c = winding_corridor(false,startx,startz,radius)
+    local action = begin(w)
+    assert(loco.dest ~= nil, "An outside cart must find the entrance to a winding narrow corridor")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_winding_corridor_inside()
+    local w,loco,c = winding_corridor(true)
+    local action = begin(w)
+    assert(loco.dest ~= nil, "The same winding corridor must remain traversable from its entrance")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7)
+end
+
+function scenarios.navigation_winding_corridor_after_pickup()
+    local w,loco,c,cargo = winding_corridor(false)
+    w.inst.components.inventory:RemoveItem(cargo)
+    cargo.Transform:SetPosition(w.inst.x+.25,0,w.inst.z)
+    local pickup = begin(w)
+    assert(pickup.action == ACTIONS.PICKUP and pickup.target == cargo and w.inst.buffered == pickup)
+    assert(w:ValidateAction(pickup)) w:PerformAction(pickup)
+    assert(w:GetCargo() == cargo and w.inst.z < 0)
+    local action = begin(w)
+    assert(action.target == c and loco.dest ~= nil,
+        "Finishing an outdoor pickup must not prevent entry for the next delivery")
+    deliver(w,action)
+    assert(c.components.container.stored.rocks == 7 and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.navigation_winding_corridor_reopens()
+    local w,loco,c,cargo = winding_corridor(false)
+    local wall = blocker(1,0,.5)
+    begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(w.pending == nil and w:IsCoolingDown(c))
+    w.nextscan = 0
+    assert(w:GetNextAction(false) == nil and w.blocked and w:GetCargo() == cargo,
+        "A genuinely closed entrance must retain the cargo and wait")
+    assert(w.inst.components.inventory.drops == nil and cargo.components.stackable:StackSize() == 7)
+    wall:Remove()
+    time = w.cooldowns[c]+.01
+    deliver(w,begin(w))
+    assert(c.components.container.stored.rocks == 7 and not w.blocked)
+end
+
+function scenarios.navigation_winding_corridor_outside_range()
+    local w,loco,c,cargo = winding_corridor(false)
+    w.inst.x,w.inst.z = 5.375,8 w:SetHome()
+    w.inst.x,w.inst.z,w.radius = 10.375,3.125,8
+    local action = begin(w)
+    if loco.dest ~= nil then tick(w,true) end
+    assert(action.target == c and w.pending == nil and w:IsCoolingDown(c),
+        "A chest inside the work circle must stay unreachable when its only entrance is outside")
+    assert(w:GetCargo() == cargo and w.inst.x == 10.375 and w.inst.z == 3.125)
+end
+
+function scenarios.navigation_winding_corridor_shared_budget()
+    local w,loco = winding_corridor(false)
+    local cars = { {worker=w,loco=loco} }
+    for _ = 2, 8 do
+        local peer = H.worker(w.inst.x) peer.radius = w.radius peer.inst.z = w.inst.z peer:SetHome()
+        local peer_loco = prepare(peer)
+        peer.inst.components.inventory:GiveItem(H.item("rocks",peer.inst.x,nil,7))
+        table.insert(cars,{worker=peer,loco=peer_loco})
+    end
+    local clear = TheWorld.Pathfinder.IsClear
+    local calls, maximum, tick_id, started = 0, 0, GetTick(), time
+    TheWorld.Pathfinder.IsClear = function(self, ...)
+        if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
+        calls = calls + 1 maximum = math.max(maximum,calls)
+        assert(calls <= 1200, "Local refinement must share the frame budget across outdoor carts")
+        return clear(self, ...)
+    end
+    for _, car in ipairs(cars) do begin(car.worker,nil,false) end
+    local completed = 0
+    for _ = 1, 550 do
+        time = time+FRAMES
+        for _, car in ipairs(cars) do
+            if not car.done then
+                car.loco:OnUpdate(FRAMES)
+                car.worker:Watchdog()
+                assert(car.worker.pending ~= nil, "Each queued cart must find the winding entrance before timeout")
+                if not car.loco._ac_navigation.searching then
+                    assert(car.loco.path ~= nil and car.worker:GetCargo().components.stackable:StackSize() == 7)
+                    car.worker:Cancel(true)
+                    car.done, completed = true, completed+1
+                end
+            end
+        end
+        if completed == #cars then break end
+    end
+    TheWorld.Pathfinder.IsClear = clear
+    assert(completed == 8, "No outdoor cart may exhaust its node budget before reaching the entrance")
+    return { maximum=maximum, cars=completed, elapsed=time-started }
+end
+
 local function moonbase_tile()
     -- A 4x4 tile, walls immediately outside its boundary, and the native
     -- moonbase's radius-1 body at its centre. Start between coarse grid lines.
@@ -334,7 +462,7 @@ function scenarios.navigation_moonbase_shared_refinement()
     TheWorld.Pathfinder.IsClear = function(self, ...)
         if GetTick() ~= tick_id then tick_id, calls = GetTick(), 0 end
         calls = calls + 1 maximum = math.max(maximum,calls)
-        assert(calls <= 1200, "Fine-grid fallback must share the same frame budget across all carts")
+        assert(calls <= 1200, "Local refinement must share the same frame budget across all carts")
         return clear(self, ...)
     end
     for _ = 1, 8 do

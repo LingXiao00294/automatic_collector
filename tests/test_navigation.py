@@ -17,6 +17,12 @@ SCENARIOS = [
     "navigation_narrow_offset_corridor",
     "navigation_narrow_wall_path_tiles",
     "navigation_narrow_closed_corridor",
+    "navigation_winding_corridor_outside",
+    "navigation_winding_corridor_inside",
+    "navigation_winding_corridor_after_pickup",
+    "navigation_winding_corridor_reopens",
+    "navigation_winding_corridor_outside_range",
+    "navigation_winding_corridor_shared_budget",
     "navigation_moonbase_walled_tile",
     "navigation_moonbase_shared_refinement",
     "navigation_chest_approach",
@@ -183,6 +189,12 @@ def test_prefab_and_navigation_with_engine_global_bit(runtime_module):
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_navigation_scenario(navigation, scenario):
     navigation.globals().scenarios[scenario]()
+
+
+@pytest.mark.parametrize("radius", [12, 20])
+@pytest.mark.parametrize("start", [(5.375, -2.625), (5.01, -2.4), (10.375, 3.125), (2.125, -1.625)])
+def test_winding_corridor_start_offsets(navigation, radius, start):
+    navigation.globals().scenarios.navigation_winding_corridor_outside(*start, radius)
 
 
 def test_native_map_overhang_recovery(navigation):

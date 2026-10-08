@@ -217,17 +217,45 @@ local function Pop(heap)
     return first
 end
 
-local function Search(context, start, goal, arrive, grid, budget)
+local function CoarseBounds(index)
+    local stride = GRID / FINE_GRID
+    local low, high = math.floor(index / stride) * stride, math.ceil(index / stride) * stride
+    if low == high then low, high = low - stride, high + stride end
+    return low, high, stride
+end
+
+local function Search(context, start, goal, arrive)
     local first = { x = start.x, y = 0, z = start.z, i = 0, j = 0, cost = 0, score = 0 }
     local nodes, heap = { ["0:0"] = first }, {}
+    local remaining = MAX_NODES
+    local function Visit(node, i, j, check_clearance)
+        local key = i .. ":" .. j
+        local nextnode = nodes[key]
+        if nextnode == nil then
+            nextnode = { x = start.x + i * FINE_GRID, y = 0, z = start.z + j * FINE_GRID,
+                i = i, j = j, cost = math.huge }
+            nodes[key] = nextnode
+        end
+        local cost = node.cost + FINE_GRID * math.sqrt((i - node.i) ^ 2 + (j - node.j) ^ 2)
+        local improves = not nextnode.closed and cost < nextnode.cost
+        if check_clearance or improves then
+            if not SegmentClear(context, node, nextnode) then return false end
+            if improves then
+                nextnode.cost, nextnode.parent = cost, node
+                nextnode.score = cost + math.max(0, math.sqrt(DistanceSq(nextnode, goal)) - arrive)
+                Push(heap, nextnode)
+            end
+        end
+        return true
+    end
     Push(heap, first)
-    while #heap > 0 and budget.remaining > 0 do
+    while #heap > 0 and remaining > 0 do
         local entry = Pop(heap)
         local node = entry.node
         if not node.closed and node.cost == entry.cost then
             SpendBudget()
             node.closed = true
-            budget.remaining = budget.remaining - 1
+            remaining = remaining - 1
             local endpoint = Approach(context, node, goal, arrive)
             if endpoint ~= nil then
                 local reverse = { endpoint }
@@ -240,20 +268,25 @@ local function Search(context, start, goal, arrive, grid, budget)
                 table.insert(steps, goal)
                 return Smooth(context, steps)
             end
-            for _, direction in ipairs(DIRECTIONS) do
-                local i, j = node.i + direction[1], node.j + direction[2]
-                local key = i .. ":" .. j
-                local nextnode = nodes[key]
-                if nextnode == nil then
-                    nextnode = { x = start.x + i * grid, y = 0, z = start.z + j * grid,
-                        i = i, j = j, cost = math.huge }
-                    nodes[key] = nextnode
+            -- Open space stays on the coarse lattice. A blocked connection adds
+            -- local fine neighbours immediately, so a narrow entrance need not
+            -- wait for an exhaustive outdoor search to consume the node budget.
+            local imin, imax, stride = CoarseBounds(node.i)
+            local jmin, jmax = CoarseBounds(node.j)
+            local blocked = false
+            for i = imin, imax, stride do
+                for j = jmin, jmax, stride do
+                    if (i ~= node.i or j ~= node.j) and not Visit(node, i, j, context.refine) then
+                        blocked = true
+                    end
                 end
-                local cost = node.cost + grid * math.sqrt(direction[1] ^ 2 + direction[2] ^ 2)
-                if not nextnode.closed and cost < nextnode.cost and SegmentClear(context, node, nextnode) then
-                    nextnode.cost, nextnode.parent = cost, node
-                    nextnode.score = cost + math.max(0, math.sqrt(DistanceSq(nextnode, goal)) - arrive)
-                    Push(heap, nextnode)
+            end
+            if blocked and context.refine then
+                -- The extra batch has its own shared work unit. Fine nodes also
+                -- reconnect to the coarse lattice instead of flooding open land.
+                SpendBudget()
+                for _, direction in ipairs(DIRECTIONS) do
+                    Visit(node, node.i + direction[1], node.j + direction[2], false)
                 end
             end
         end
@@ -264,14 +297,7 @@ end
 local function Plan(context, start, goal, arrive)
     local endpoint = Approach(context, start, goal, arrive)
     if endpoint ~= nil then return { start, endpoint, goal } end
-    local budget = { remaining = MAX_NODES }
-    local steps = Search(context, start, goal, arrive, GRID, budget)
-    -- Refinement can enter a clear gap that contains no coarse-grid waypoint.
-    -- Both passes share the node cap as well as the world's per-frame budget.
-    if steps == nil and context.refine then
-        steps = Search(context, start, goal, arrive, FINE_GRID, budget)
-    end
-    return steps
+    return Search(context, start, goal, arrive)
 end
 
 local function PauseMovement(locomotor)
