@@ -470,7 +470,7 @@ end
 
 local function CancelSearch(state)
     if state ~= nil then
-        state.search, state.locomotor, state.context, state.dest, state.target = nil, nil, nil, nil, nil
+        state.search, state.locomotor, state.context, state.dest, state.target, state.action = nil, nil, nil, nil, nil, nil
         state.refresh_search = nil
         state.searching, state.refreshing = false, false
     end
@@ -526,6 +526,9 @@ local function PumpRefreshes()
                 local spent = quota - scheduler.slice
                 scheduler.remaining = scheduler.remaining - spent
                 scheduler.refresh_remaining = scheduler.refresh_remaining - spent
+                if spent > 0 and state.refresh_paused ~= nil then
+                    locomotor.inst.components.ac_worker:RecordActionProgress(state.action)
+                end
                 finished = coroutine.status(state.refresh_search) == "dead"
                 if finished then
                     context.budgeted = false
@@ -582,7 +585,13 @@ local function PumpSearches()
                 scheduler.slice = quota
                 local ok, result, steps, goal = coroutine.resume(state.search)
                 assert(ok, result)
-                scheduler.remaining = scheduler.remaining - (quota - scheduler.slice)
+                local spent = quota - scheduler.slice
+                scheduler.remaining = scheduler.remaining - spent
+                if spent > 0 then
+                    -- Search work, not total queue age, keeps this action alive.
+                    -- The shared frame budget and per-search node cap still apply.
+                    locomotor.inst.components.ac_worker:RecordActionProgress(state.action)
+                end
                 if coroutine.status(state.search) == "dead" then
                     CompleteSearch(state, result, steps, goal)
                 else
@@ -617,6 +626,7 @@ local function FindPath(locomotor)
     CancelSearch(locomotor._ac_navigation)
     locomotor:ResetPath()
     local state = { dest = locomotor.dest, locomotor = locomotor, target = target, radius = radius,
+        action = locomotor.bufferedaction,
         searching = true, step = 2, dt = previous ~= nil and previous.dt or FRAMES,
         nextplan = GetTime() + RECHECK,
         retries = previous ~= nil and previous.retries or 0 }
@@ -829,7 +839,10 @@ function M.Attach(inst)
                 local point = LocalPoint(platform, inst:GetPosition())
                 local moved = DistanceSq(point, state.progress) >= .1 ^ 2
                 local stuck = not moved and time - state.progress_time >= STUCK_TIME
-                if moved then state.progress, state.progress_time = point, time end
+                if moved then
+                    state.progress, state.progress_time = point, time
+                    inst.components.ac_worker:RecordActionProgress(state.action)
+                end
                 local goal = LocalPoint(platform, Vector3(self.dest:GetPoint()))
                 if stuck or DistanceSq(goal, state.goal) > .25 ^ 2 or not RouteClear(self) then
                     if stuck then

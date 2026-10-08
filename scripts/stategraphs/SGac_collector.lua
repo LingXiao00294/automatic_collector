@@ -36,6 +36,8 @@ local function WorkState(name, animation, duration, impact)
             inst.AnimState:SetDeltaTimeMultiplier(speed)
             inst.AnimState:PlayAnimation(animation)
             inst.sg.statemem.action = inst:GetBufferedAction()
+            -- The work animation has its own deadline after a long trip.
+            inst.components.ac_worker:RecordActionProgress(inst.sg.statemem.action)
             local target = inst.sg.statemem.action ~= nil and inst.sg.statemem.action.target or nil
             if target ~= nil and target:IsValid() then
                 inst:ForceFacePoint(target:GetPosition())

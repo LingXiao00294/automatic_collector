@@ -180,8 +180,8 @@ local function begin(w, before, wait_for_search)
     return action
 end
 
-local function tick(w, frozen, before)
-    time = time + FRAMES
+local function tick(w, frozen, before, same_frame)
+    if not same_frame then time = time + FRAMES end
     if before ~= nil then before() end
     local inst, loco = w.inst, w.inst.components.locomotor
     loco:OnUpdate(FRAMES)
@@ -437,6 +437,155 @@ function scenarios.navigation_winding_corridor_shared_budget()
     deliver(delivery.worker,delivery.worker.pending.action)
     assert(time-started < w.config.action_timeout, "Planning plus delivery must fit the existing action timeout")
     return { maximum=maximum, cars=completed, elapsed=search_elapsed, delivery_elapsed=time-started }
+end
+
+function scenarios.navigation_queue_keeps_progress()
+    local cars, completed, latest_plan = {}, 0, 0
+    for i = 1, 8 do
+        -- Independent work areas isolate global scheduling from cart congestion.
+        local base = i*100
+        local w = H.worker(base-2.375) w.radius, w.inst.z = 20, .125 w:SetHome()
+        local loco = prepare(w)
+        local c = physics(H.chest(base+2.375),.5,OBSTACLES,CHARACTERS) c.z = .125
+        local cargo = H.item("rocks",w.inst.x,nil,7) w.inst.components.inventory:GiveItem(cargo)
+        for z = -17, 17, .75 do blocker(base,z,.5) end
+        for x = -18, -4, 1.8 do
+            for z = -18, 18, 1.8 do if x*x+z*z < 19^2 then blocker(base+x,z,.5) end end
+        end
+        w.Trace = function(_, event)
+            if event == "path_found" then latest_plan = time end
+        end
+        table.insert(cars,{worker=w,loco=loco,chest=c,cargo=cargo})
+    end
+    for _, car in ipairs(cars) do car.action = begin(car.worker,nil,false) end
+    local waited_past_deadline = false
+    for frame = 1, 1800 do
+        time = time+FRAMES
+        for _, car in ipairs(cars) do
+            if not car.done then
+                tick(car.worker,false,nil,true)
+                if frame%3 == 0 then car.worker:Watchdog() end
+                assert(car.worker.pending ~= nil, "Queued search progress must survive the old total deadline")
+                waited_past_deadline = waited_past_deadline or (time > 20 and car.loco._ac_navigation ~= nil
+                    and car.loco._ac_navigation.searching)
+                if car.worker.inst.buffered == car.action then
+                    assert(car.worker:ValidateAction(car.action) and car.worker:CanInteract(car.action))
+                    car.worker:PerformAction(car.action)
+                    assert(car.chest.components.container.stored.rocks == 7 and car.worker:GetCargo() == nil)
+                    assert(car.worker.inst.components.inventory.drops == nil)
+                    car.done, completed = true, completed+1
+                end
+            end
+        end
+        if completed == #cars then break end
+    end
+    assert(waited_past_deadline and completed == #cars,
+        "All eight independent carts must finish planning and deliver, without cancelling peers")
+    return { cars=completed, planned=latest_plan, elapsed=time }
+end
+
+local function long_route_worker()
+    local w = H.worker(7) w.radius = 20 w:SetHome()
+    w.inst.x,w.inst.z = -1,-7.5
+    local loco = prepare(w)
+    local c = H.chest(15) c.z = -7.5
+    local cargo = H.item("rocks",-1,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    for x = 0, 14, 2 do
+        local low,high = -8,8
+        if x%4 == 0 then high = 6 else low = -6 end
+        for z = low, high, .75 do blocker(x,z,.45) end
+    end
+    ground = function(x,z) return x >= -2 and x <= 16 and z >= -8.5 and z <= 8.5 end
+    return w,loco,c,cargo,begin(w,nil,false)
+end
+
+function scenarios.navigation_long_walking_progress()
+    local w,loco,c,cargo,action = long_route_worker()
+    for frame = 1, 1500 do
+        tick(w)
+        if frame%3 == 0 then w:Watchdog() end
+        assert(w.pending ~= nil, "Continuous walking progress must survive the old total deadline")
+        if w.inst.buffered == action then break end
+    end
+    assert(time > 20 and w.inst.buffered == action and loco._ac_navigation == nil)
+    local state = H.enter(w,action,"store")
+    time = time+.2 w.inst.sg.timeinstate = .2 state.onupdate(w.inst)
+    assert(w.pending == nil and w:GetCargo() == nil and c.components.container.stored.rocks == 7)
+    assert(cargo.components.inventoryitem.owner == c and w.inst.components.inventory.drops == nil)
+    return { elapsed=time, stored=c.components.container.stored.rocks }
+end
+
+function scenarios.navigation_long_navigation_target_changes()
+    local w,loco,c,cargo,action = long_route_worker()
+    while time < 20.5 do
+        tick(w) w:Watchdog()
+        assert(w.pending ~= nil, "Long valid navigation must stay active before the receiver changes")
+    end
+    assert(loco.dest ~= nil)
+    c.components.container.capacity = 0
+    action:Fail() -- Native failure may precede the next semantic watchdog check.
+    assert(w.pending == nil and not w:IsCoolingDown(c) and w:GetCargo() == cargo,
+        "Expired original start time must not misclassify a late capacity change as navigation failure")
+end
+
+function scenarios.navigation_search_no_progress_timeout()
+    local w = H.worker() local loco = prepare(w) local c = H.chest(8)
+    local cargo = H.item("rocks",0,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    ground = function(x) return x < 3 or x > 4 end
+    local action = begin(w,nil,false)
+    assert(loco._ac_navigation.searching)
+    local failures = 0 action:AddFailAction(function() failures = failures+1 end)
+    -- No locomotor updates: a lost/stalled scheduler must still release the job.
+    time = time+21 w:Watchdog() w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "search_timeout" and failures == 1)
+    assert(w:GetNextAction(false) == nil and w.blocked and w:GetCargo() == cargo)
+    assert(w:IsWaitingForRoute(c) and w.inst.components.inventory.drops == nil)
+end
+
+function scenarios.navigation_walk_no_progress_timeout()
+    local w = H.worker() prepare(w) local c = H.chest(8)
+    local cargo = H.item("rocks",0,nil,7) w.inst.components.inventory:GiveItem(cargo)
+    local action = begin(w)
+    local failures = 0 action:AddFailAction(function() failures = failures+1 end)
+    time = time+21 w:Watchdog() w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "navigation_timeout" and failures == 1)
+    assert(w:GetNextAction(false) == nil and w:IsWaitingForRoute(c) and w:GetCargo() == cargo)
+    assert(w.inst.components.inventory.drops == nil)
+    c.components.container.capacity = 0
+    time = time+1 w:GetNextAction(false)
+    assert(w:GetCargo() == nil and #w.inst.components.inventory.drops == 1)
+    assert(w.inst.components.inventory.drops[1].item == cargo and cargo.components.stackable:StackSize() == 7)
+end
+
+function scenarios.navigation_timeout_contact_phase()
+    local w = H.worker() local loco = prepare(w) local c = H.chest(.3)
+    w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+    local action = begin(w)
+    assert(loco._ac_navigation == nil and w.inst.buffered == action)
+    time = time+19
+    H.enter(w,action,"store")
+    function w.inst.sg:HasStateTag(tag)
+        for _, value in ipairs(self.currentstate.tags or {}) do if value == tag then return true end end
+        return false
+    end
+    time = time+19 w:Watchdog()
+    assert(w.pending ~= nil, "Work animation must receive its own timeout window after navigation")
+    time = time+2 w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "timeout" and not w:IsWaitingForRoute(c),
+        "A stalled interaction is not a navigation failure and must still time out")
+end
+
+function scenarios.navigation_timeout_cancelled_progress()
+    local w = H.worker() prepare(w) H.chest(8)
+    w.inst.components.inventory:GiveItem(H.item("rocks",0,nil,7))
+    local old = begin(w)
+    w:Cancel(true)
+    local current = w:GetNextAction()
+    assert(current ~= nil and current ~= old)
+    time = time+19 w:RecordActionProgress(old)
+    time = time+2 w:Watchdog()
+    assert(w.pending == nil and w.last_failure == "timeout",
+        "A cancelled action must not extend the replacement action's deadline")
 end
 
 function scenarios.navigation_subgrid_circular_elbow(startz, angle)

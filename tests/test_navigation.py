@@ -236,6 +236,35 @@ def test_dense_obstacle_budget(navigation, population, detour):
     )
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "navigation_queue_keeps_progress",
+        "navigation_long_walking_progress",
+        "navigation_long_navigation_target_changes",
+        "navigation_search_no_progress_timeout",
+        "navigation_walk_no_progress_timeout",
+        "navigation_timeout_contact_phase",
+        "navigation_timeout_cancelled_progress",
+    ],
+)
+def test_navigation_progress_deadlines(navigation, scenario):
+    with ZipFile(native_bundle()) as archive:
+        navigation.execute(archive.read("scripts/bufferedaction.lua").decode("utf-8"))
+    navigation.execute("""
+        ACTIONS.STORE.distance = nil
+        local original_item = upgrade_contract.item
+        upgrade_contract.item = function(...)
+            local item = original_item(...)
+            item.replica = { inventoryitem = { IsHeldBy = function(_, owner)
+                return item.components.inventoryitem.owner == owner
+            end } }
+            return item
+        end
+    """)
+    navigation.globals().scenarios[scenario]()
+
+
 def test_native_map_overhang_recovery(navigation):
     with ZipFile(native_bundle()) as archive:
         source = archive.read("scripts/components/map.lua").decode("utf-8")
