@@ -376,6 +376,17 @@ function Worker:ValidateAction(action)
     return self:CanHarvest(action.target, kind)
 end
 
+function Worker:CanInteract(action)
+    local locomotor = self.inst.components.locomotor
+    local arrive = action.arrivedist or locomotor.arrive_dist
+    -- Use the distance selected by native GoToEntity, including action and body
+    -- radii. Semantic validation while walking must not apply this contact gate.
+    if arrive ~= nil and self.inst:GetDistanceSqToInst(action.target) > arrive ^ 2 + .000001 then
+        return false
+    end
+    return locomotor.ac_can_interact == nil or locomotor:ac_can_interact(action.target)
+end
+
 function Worker:Watchdog()
     if self.pending ~= nil and (not self:IsWorking()
         or GetTime() - self.pending.started > self.config.action_timeout) then

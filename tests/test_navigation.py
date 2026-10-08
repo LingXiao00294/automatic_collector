@@ -23,6 +23,9 @@ SCENARIOS = [
     "navigation_winding_corridor_reopens",
     "navigation_winding_corridor_outside_range",
     "navigation_winding_corridor_shared_budget",
+    "navigation_small_target_displacement",
+    "navigation_terrain_narrow_elbow",
+    "navigation_index_large_obstacle",
     "navigation_moonbase_walled_tile",
     "navigation_moonbase_shared_refinement",
     "navigation_chest_approach",
@@ -195,6 +198,42 @@ def test_navigation_scenario(navigation, scenario):
 @pytest.mark.parametrize("start", [(5.375, -2.625), (5.01, -2.4), (10.375, 3.125), (2.125, -1.625)])
 def test_winding_corridor_start_offsets(navigation, radius, start):
     navigation.globals().scenarios.navigation_winding_corridor_outside(*start, radius)
+
+
+@pytest.mark.parametrize("startz", [0, 0.04, 0.125, 0.21])
+@pytest.mark.parametrize("angle", [0, 0.37])
+def test_subgrid_circular_elbow(navigation, startz, angle):
+    navigation.globals().scenarios.navigation_subgrid_circular_elbow(startz, angle)
+
+
+@pytest.mark.parametrize("change", ["move", "remove", "cancel"])
+def test_snapshot_boat_lifecycle(navigation, change):
+    navigation.globals().scenarios.navigation_snapshot_boat_lifecycle(change)
+
+
+@pytest.mark.parametrize("kind", ["pickup", "store"])
+@pytest.mark.parametrize("change", ["none", "character", "target", "cart", "wall", "water"])
+def test_contact_conditions(navigation, kind, change):
+    with ZipFile(native_bundle()) as archive:
+        navigation.execute(archive.read("scripts/bufferedaction.lua").decode("utf-8"))
+        source = archive.read("scripts/actions.lua").decode("utf-8")
+    start = source.index("ACTIONS.PICKUP.fn = function(act)")
+    end = source.index("\nACTIONS.EMPTY_CONTAINER.fn", start)
+    navigation.execute(source[start:end])
+    navigation.globals().scenarios.navigation_contact_conditions(change, kind)
+
+
+@pytest.mark.parametrize("population", [120, 300])
+@pytest.mark.parametrize("detour", [False, True])
+def test_dense_obstacle_budget(navigation, population, detour):
+    result = navigation.globals().scenarios.navigation_dense_obstacle_budget(population, detour)
+    assert result.scans <= 4, "Initial and completion snapshots must share the query-start limit"
+    assert result.reads <= 4096, (
+        "Snapshot entity processing must yield within the shared work budget"
+    )
+    assert result.collisions <= 4608, (
+        "Detailed collision checks must be budgeted, not only A* nodes"
+    )
 
 
 def test_native_map_overhang_recovery(navigation):

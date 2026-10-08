@@ -11,6 +11,10 @@ local MAX_SNAPSHOT_AGE = .5
 local STUCK_TIME = 1.5
 local FRAME_BUDGET = 128
 local SEARCH_SLICE = 16
+local CELL_SIZE = 2
+-- Charge inner-loop operations as fractions of the existing node work unit.
+local DETAIL_COST = 1 / 128
+local SNAPSHOTS_PER_FRAME = 4
 local scheduler
 local EXCLUDE = { "INLIMBO", "FX" }
 local DIRECTIONS = { { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 },
@@ -28,12 +32,86 @@ local function WorldPoint(platform, point)
     return platform ~= nil and Vector3(platform.entity:LocalToWorldSpace(point.x, point.y or 0, point.z)) or point
 end
 
-local function Context(inst, radius, target)
+local function SpendBudget(cost)
+    cost = cost or 1
+    while cost > scheduler.slice do
+        cost = cost - scheduler.slice
+        scheduler.slice = 0
+        coroutine.yield()
+    end
+    scheduler.slice = scheduler.slice - cost
+end
+
+local function Detail(context)
+    if context.budgeted then SpendBudget(DETAIL_COST) end
+end
+
+local function GeometryPoint(context, point)
+    return context.local_coordinates and point or LocalPoint(context.platform, point)
+end
+
+local function CellKey(x, z)
+    return x .. ":" .. z
+end
+
+local function IndexBlocker(context, point)
+    local position = point.localpos or point
+    for x = math.floor((position.x - point.radius) / CELL_SIZE), math.floor((position.x + point.radius) / CELL_SIZE) do
+        for z = math.floor((position.z - point.radius) / CELL_SIZE), math.floor((position.z + point.radius) / CELL_SIZE) do
+            Detail(context)
+            local key = CellKey(x, z)
+            local bucket = context.cells[key]
+            if bucket == nil then bucket = {} context.cells[key] = bucket end
+            table.insert(bucket, point)
+        end
+    end
+end
+
+local function Bucket(context, x, z, found, seen, cells)
+    Detail(context)
+    for _, point in ipairs((cells or context.cells)[CellKey(x, z)] or {}) do
+        Detail(context)
+        if not seen[point] then seen[point] = true table.insert(found, point) end
+    end
+end
+
+local function AlongSegment(context, a, b)
+    local found, seen = {}, {}
+    local x, z = math.floor(a.x / CELL_SIZE), math.floor(a.z / CELL_SIZE)
+    local ex, ez = math.floor(b.x / CELL_SIZE), math.floor(b.z / CELL_SIZE)
+    local dx, dz = b.x - a.x, b.z - a.z
+    local sx, sz = dx >= 0 and 1 or -1, dz >= 0 and 1 or -1
+    local tx = dx ~= 0 and ((x + (sx > 0 and 1 or 0)) * CELL_SIZE - a.x) / dx or math.huge
+    local tz = dz ~= 0 and ((z + (sz > 0 and 1 or 0)) * CELL_SIZE - a.z) / dz or math.huge
+    local stepx = dx ~= 0 and CELL_SIZE / math.abs(dx) or math.huge
+    local stepz = dz ~= 0 and CELL_SIZE / math.abs(dz) or math.huge
+    while true do
+        Bucket(context, x, z, found, seen)
+        if x == ex and z == ez then break end
+        if x ~= ex and (z == ez or tx < tz) then x, tx = x + sx, tx + stepx
+        else z, tz = z + sz, tz + stepz end
+    end
+    return found
+end
+
+local function Nearby(context, point, radius, cells)
+    local found, seen = {}, {}
+    for x = math.floor((point.x - radius) / CELL_SIZE), math.floor((point.x + radius) / CELL_SIZE) do
+        for z = math.floor((point.z - radius) / CELL_SIZE), math.floor((point.z + radius) / CELL_SIZE) do
+            Bucket(context, x, z, found, seen, cells)
+        end
+    end
+    return found
+end
+
+local function Context(inst, radius, target, scanpoint, budgeted, state)
     local home = inst.components.ac_worker:GetHome()
     local physics = inst.Physics
     local context = { home = home, radius = radius, platform = inst:GetCurrentPlatform(),
         clearance = physics:GetRadius() + CLEARANCE,
-        pathcaps = {}, target = target, blockers = {} }
+        pathcaps = {}, target = target, blockers = {}, cells = {}, budgeted = budgeted }
+    context.localhome = LocalPoint(context.platform, home)
+    if state ~= nil then state.context = context end
     for key, value in pairs(inst.components.locomotor.pathcaps or {}) do context.pathcaps[key] = value end
     -- Native wall tiles are coarser than narrow gaps between actual bodies.
     -- Keep terrain checks, and test walls against their real collision circles.
@@ -43,9 +121,21 @@ local function Context(inst, radius, target)
     -- congestion is handled by native character physics and the stuck backoff,
     -- rather than rebuilding static routes around each moving/overlapping cart.
     local scanradius = radius + (MAX_PHYSICS_RADIUS or 4) + context.clearance
-    for _, ent in ipairs(TheSim:FindEntities(home.x, 0, home.z, scanradius, nil, EXCLUDE)) do
+    scanpoint = scanpoint or home
+    if budgeted then
+        while scheduler.snapshots == 0 do
+            -- The engine query is indivisible; cap query starts as well as the
+            -- incremental Lua work, including initial and completion snapshots.
+            scheduler.slice = 0
+            coroutine.yield()
+        end
+        scheduler.snapshots = scheduler.snapshots - 1
+    end
+    context.snapshot_time = GetTime()
+    for _, ent in ipairs(TheSim:FindEntities(scanpoint.x, 0, scanpoint.z, scanradius, nil, EXCLUDE)) do
+        Detail(context)
         local other = ent.Physics
-        if ent ~= inst and not ent:HasTag("automatic_collector") and other ~= nil and other:IsActive()
+        if ent ~= inst and ent:IsValid() and not ent:HasTag("automatic_collector") and other ~= nil and other:IsActive()
             and bit.band(other:GetCollisionMask(), physics:GetCollisionGroup()) ~= 0
             and bit.band(physics:GetCollisionMask(), other:GetCollisionGroup()) ~= 0
             and ent:GetCurrentPlatform() == context.platform then
@@ -57,12 +147,15 @@ local function Context(inst, radius, target)
             if not point.character and ent ~= target then context.refine = true end
             if context.platform ~= nil then point.localpos = LocalPoint(context.platform, point) end
             table.insert(context.blockers, point)
+            point.id = #context.blockers
+            IndexBlocker(context, point)
         end
     end
     return context
 end
 
 local function OnGround(context, x, z)
+    Detail(context)
     if context.platform ~= nil then
         if context.local_coordinates then
             local worldx, _, worldz = context.platform.entity:LocalToWorldSpace(x, 0, z)
@@ -78,6 +171,7 @@ local function InRange(context, point)
 end
 
 local function NativeClear(context, a, b)
+    Detail(context)
     return TheWorld.Pathfinder:IsClear(a.x, 0, a.z, b.x, 0, b.z, context.pathcaps)
 end
 
@@ -136,23 +230,28 @@ local function InteractionClear(context, point, goal)
     -- Characters are not obstacles: native pickup has no reach limit and physics
     -- separates bodies, so the player who dropped a stack, a creature or another
     -- car standing on it must not make that drop permanently unreachable.
-    for _, blocker in ipairs(context.blockers) do
+    local a, b = GeometryPoint(context, point), GeometryPoint(context, goal)
+    for _, blocker in ipairs(AlongSegment(context, a, b)) do
+        Detail(context)
         if not blocker.character and blocker.entity ~= context.target
-            and SegmentDistanceSq(point, goal, blocker) < blocker.physics_radius ^ 2 then return false end
+            and SegmentDistanceSq(a, b, blocker.localpos or blocker) < blocker.physics_radius ^ 2 then return false end
     end
     return TerrainClear(context, point, goal, 0)
 end
 
 local function SegmentClear(context, a, b)
     if not InRange(context, b) then return false end
-    local dx, dz = b.x - a.x, b.z - a.z
-    for _, blocker in ipairs(context.blockers) do
-        if SegmentDistanceSq(a, b, blocker) < blocker.radius ^ 2 then
+    local ga, gb = GeometryPoint(context, a), GeometryPoint(context, b)
+    local dx, dz = gb.x - ga.x, gb.z - ga.z
+    for _, blocker in ipairs(AlongSegment(context, ga, gb)) do
+        Detail(context)
+        local position = blocker.localpos or blocker
+        if SegmentDistanceSq(ga, gb, position) < blocker.radius ^ 2 then
             -- A newly placed obstacle may overlap the car; allow only an escape
             -- segment whose distance from that obstacle increases from the start.
-            if DistanceSq(a, blocker) >= blocker.radius ^ 2
-                or (a.x - blocker.x) * dx + (a.z - blocker.z) * dz < 0
-                or DistanceSq(b, blocker) <= DistanceSq(a, blocker) then return false end
+            if DistanceSq(ga, position) >= blocker.radius ^ 2
+                or (ga.x - position.x) * dx + (ga.z - position.z) * dz < 0
+                or DistanceSq(gb, position) <= DistanceSq(ga, position) then return false end
         end
     end
     return TerrainClear(context, a, b, context.clearance)
@@ -171,9 +270,38 @@ local function Approach(context, point, goal, arrive)
         and InteractionClear(context, endpoint, goal) and endpoint or nil
 end
 
-local function SpendBudget()
-    if scheduler.slice == 0 then coroutine.yield() end
-    scheduler.slice = scheduler.slice - 1
+local function GapPoints(context)
+    local cells, seen = {}, {}
+    if not context.refine then return cells end
+    for _, a in ipairs(context.blockers) do
+        Detail(context)
+        if not a.character then
+            local pa = a.localpos or a
+            for _, b in ipairs(Nearby(context, pa, a.radius + GRID)) do
+                Detail(context)
+                if b.id > a.id and not b.character then
+                    local pb = b.localpos or b
+                    local distance = math.sqrt(DistanceSq(pa, pb))
+                    local gap = distance - a.radius - b.radius
+                    if gap > .000001 and gap <= GRID then
+                        -- Midpoint of the free interval between inflated bodies.
+                        -- Its position follows obstacle geometry, not grid phase.
+                        local t = (a.radius + gap / 2) / distance
+                        local point = { x = pa.x + (pb.x - pa.x) * t, y = 0,
+                            z = pa.z + (pb.z - pa.z) * t }
+                        local key = string.format("p:%.6f:%.6f", point.x, point.z)
+                        if not seen[key] and SegmentClear(context, point, point) then
+                            seen[key], point.key = true, key
+                            local cell = CellKey(math.floor(point.x / CELL_SIZE), math.floor(point.z / CELL_SIZE))
+                            if cells[cell] == nil then cells[cell] = {} end
+                            table.insert(cells[cell], point)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return cells
 end
 
 local function Smooth(context, steps)
@@ -227,16 +355,14 @@ end
 local function Search(context, start, goal, arrive)
     local first = { x = start.x, y = 0, z = start.z, i = 0, j = 0, cost = 0, score = 0 }
     local nodes, heap = { ["0:0"] = first }, {}
+    local gaps = GapPoints(context)
+    local has_gaps = next(gaps) ~= nil
     local remaining = MAX_NODES
-    local function Visit(node, i, j, check_clearance)
-        local key = i .. ":" .. j
-        local nextnode = nodes[key]
-        if nextnode == nil then
-            nextnode = { x = start.x + i * FINE_GRID, y = 0, z = start.z + j * FINE_GRID,
-                i = i, j = j, cost = math.huge }
-            nodes[key] = nextnode
-        end
-        local cost = node.cost + FINE_GRID * math.sqrt((i - node.i) ^ 2 + (j - node.j) ^ 2)
+    local function Connect(node, nextnode, check_clearance)
+        -- A circular work boundary alone needs no dense ring of fine nodes.
+        -- Obstacle/terrain rejection inside it still triggers local refinement.
+        if not InRange(context, nextnode) then return true end
+        local cost = node.cost + math.sqrt(DistanceSq(node, nextnode))
         local improves = not nextnode.closed and cost < nextnode.cost
         if check_clearance or improves then
             if not SegmentClear(context, node, nextnode) then return false end
@@ -247,6 +373,14 @@ local function Search(context, start, goal, arrive)
             end
         end
         return true
+    end
+    local function Visit(node, i, j, check_clearance)
+        local key = i .. ":" .. j
+        if nodes[key] == nil then
+            nodes[key] = { x = start.x + i * FINE_GRID, y = 0, z = start.z + j * FINE_GRID,
+                i = i, j = j, cost = math.huge }
+        end
+        return Connect(node, nodes[key], check_clearance)
     end
     Push(heap, first)
     while #heap > 0 and remaining > 0 do
@@ -281,12 +415,34 @@ local function Search(context, start, goal, arrive)
                     end
                 end
             end
-            if blocked and context.refine then
+            if blocked then
                 -- The extra batch has its own shared work unit. Fine nodes also
                 -- reconnect to the coarse lattice instead of flooding open land.
                 SpendBudget()
-                for _, direction in ipairs(DIRECTIONS) do
-                    Visit(node, node.i + direction[1], node.j + direction[2], false)
+                if node.gap then
+                    -- Geometry nodes join the existing lattice without starting
+                    -- an unbounded family of shifted fine grids.
+                    for i = math.floor(node.i), math.ceil(node.i) do
+                        for j = math.floor(node.j), math.ceil(node.j) do Visit(node, i, j, false) end
+                    end
+                else
+                    for _, direction in ipairs(DIRECTIONS) do
+                        Visit(node, node.i + direction[1], node.j + direction[2], false)
+                    end
+                end
+            end
+            if has_gaps and blocked then
+                for _, point in ipairs(Nearby(context, node, GRID * 2, gaps)) do
+                    Detail(context)
+                    if DistanceSq(node, point) <= (GRID * 2) ^ 2 then
+                        local nextnode = nodes[point.key]
+                        if nextnode == nil then
+                            nextnode = { x = point.x, y = 0, z = point.z, cost = math.huge, gap = true,
+                                i = (point.x - start.x) / FINE_GRID, j = (point.z - start.z) / FINE_GRID }
+                            nodes[point.key] = nextnode
+                        end
+                        Connect(node, nextnode, false)
+                    end
                 end
             end
         end
@@ -315,6 +471,7 @@ end
 local function CancelSearch(state)
     if state ~= nil then
         state.search, state.locomotor, state.context, state.dest, state.target = nil, nil, nil, nil, nil
+        state.refresh_search = nil
         state.searching, state.refreshing = false, false
     end
 end
@@ -324,9 +481,9 @@ local function CompleteSearch(state, context, steps, goal)
     state.search, state.searching = nil, false
     state.context, state.failed = context, steps == nil
     state.validate = true
-    state.progress = LocalPoint(context.platform, locomotor.inst:GetPosition())
+    state.progress = steps ~= nil and LocalPoint(context.platform, locomotor.inst:GetPosition()) or locomotor.inst:GetPosition()
     state.progress_time, state.nextcheck = GetTime(), GetTime() + RECHECK
-    state.snapshot_time = GetTime()
+    state.snapshot_time = context.snapshot_time
     state.goal = goal
     if steps ~= nil then
         state.localsteps = steps
@@ -339,37 +496,55 @@ local function CompleteSearch(state, context, steps, goal)
 end
 
 local function PumpRefreshes()
-    -- Rechecks must not synchronously rescan every cart's range on the same tick.
-    -- One whole snapshot per frame bounds that burst; FIFO also prevents carts
-    -- late in the update order from starving behind continuously moving peers.
-    while scheduler.remaining > 0 and scheduler.refreshes > 0
+    -- A snapshot can span slices/frames. Reserve at most half a frame for FIFO
+    -- refreshes, leaving searches a turn even in unusually dense scenes.
+    while scheduler.remaining > 0 and scheduler.refresh_remaining > 0
         and scheduler.refresh_head <= scheduler.refresh_tail do
         local state = scheduler.refresh_queue[scheduler.refresh_head]
-        scheduler.refresh_queue[scheduler.refresh_head] = nil
-        scheduler.refresh_head = scheduler.refresh_head + 1
         local locomotor = state.locomotor
+        local finished = true
         if locomotor ~= nil and locomotor._ac_navigation == state and locomotor.dest == state.dest
             and locomotor.inst:IsValid() and locomotor.inst.components.ac_worker:IsWorking()
             and locomotor.dest:IsValid() then
             local platform = state.context.platform
-            state.refreshing = false
             if locomotor.inst:GetCurrentPlatform() ~= platform
                 or (platform ~= nil and not platform:IsValid()) then
                 state.failed, state.failure_reason = true, "platform_changed"
             else
-                scheduler.remaining, scheduler.refreshes = scheduler.remaining - 1, scheduler.refreshes - 1
-                state.context = Context(locomotor.inst, state.radius, state.target)
-                state.snapshot_time = GetTime()
-                -- Only actual stopped time is exempt. Background rechecks must
-                -- not hide a physical stall while a car is still told to move.
-                if state.refresh_paused ~= nil then
-                    state.progress_time = state.progress_time + GetTime() - state.refresh_paused
-                    state.refresh_paused = nil
+                if state.refresh_search == nil then
+                    if scheduler.refreshes == 0 then break end
+                    scheduler.refreshes = scheduler.refreshes - 1
+                    state.refresh_search = coroutine.create(function()
+                        SpendBudget()
+                        return Context(locomotor.inst, state.radius, state.target, nil, true)
+                    end)
                 end
-                state.validate = true
+                local quota = math.min(SEARCH_SLICE, scheduler.remaining, scheduler.refresh_remaining)
+                scheduler.slice = quota
+                local ok, context = coroutine.resume(state.refresh_search)
+                assert(ok, context)
+                local spent = quota - scheduler.slice
+                scheduler.remaining = scheduler.remaining - spent
+                scheduler.refresh_remaining = scheduler.refresh_remaining - spent
+                finished = coroutine.status(state.refresh_search) == "dead"
+                if finished then
+                    context.budgeted = false
+                    state.refresh_search, state.refreshing = nil, false
+                    state.context, state.snapshot_time = context, context.snapshot_time
+                    -- Only actual stopped time is exempt from stuck detection.
+                    if state.refresh_paused ~= nil then
+                        state.progress_time = state.progress_time + GetTime() - state.refresh_paused
+                        state.refresh_paused = nil
+                    end
+                    state.validate = true
+                end
             end
         else
             CancelSearch(state)
+        end
+        if finished then
+            scheduler.refresh_queue[scheduler.refresh_head] = nil
+            scheduler.refresh_head = scheduler.refresh_head + 1
         end
     end
     if scheduler.refresh_head > scheduler.refresh_tail then
@@ -385,6 +560,7 @@ local function PumpSearches()
     end
     if scheduler.tick ~= tick then
         scheduler.tick, scheduler.remaining, scheduler.refreshes = tick, FRAME_BUDGET, 1
+        scheduler.refresh_remaining, scheduler.snapshots = FRAME_BUDGET / 2, SNAPSHOTS_PER_FRAME
     end
     -- Reserve a turn for waiting rechecks before searches spend the frame budget.
     PumpRefreshes()
@@ -449,14 +625,18 @@ local function FindPath(locomotor)
     -- Round-robin slices prevent a crowd of unreachable targets blocking one tick.
     state.search = coroutine.create(function()
         SpendBudget()
-        local context = Context(inst, radius, target)
+        local context = Context(inst, radius, target, nil, true, state)
         state.context = context
         local platform = context.platform
+        if inst:GetCurrentPlatform() ~= platform or (platform ~= nil and not platform:IsValid()) then
+            state.failure_reason, context.budgeted = "platform_changed", false
+            return context, nil, start
+        end
         -- Keep the entire in-progress search in the boat's coordinate system.
         -- Map queries project into its current pose, even after a yielded frame.
         if platform ~= nil then
             context.local_coordinates = true
-            context.home = LocalPoint(platform, context.home)
+            context.home = context.localhome
             for _, blocker in ipairs(context.blockers) do
                 blocker.x, blocker.z = blocker.localpos.x, blocker.localpos.z
             end
@@ -466,7 +646,12 @@ local function FindPath(locomotor)
         SpendBudget()
         -- Obstacles may change while queued; validate against a fresh snapshot
         -- before resuming movement, not after the next periodic recheck.
-        return Context(inst, radius, target), steps, goal
+        local fresh = Context(inst, radius, target, nil, true)
+        fresh.budgeted = false
+        if fresh.platform ~= platform or (platform ~= nil and not platform:IsValid()) then
+            state.failure_reason, steps = "platform_changed", nil
+        end
+        return fresh, steps, goal
     end)
     PumpSearches()
     scheduler.tail = scheduler.tail + 1
@@ -488,10 +673,14 @@ end
 local function NextPoint(locomotor)
     local path = locomotor.path
     local state = locomotor._ac_navigation
-    if path ~= nil and path.steps ~= nil and state.step < #path.steps then
+    local goal = Vector3(locomotor.dest:GetPoint())
+    if path ~= nil and path.steps ~= nil and state.step < #path.steps
+        and (state.step < #path.steps - 1
+            or DistanceSq(LocalPoint(state.context.platform, goal), state.goal) < .00000001) then
         return path.steps[state.step]
     end
-    local goal = Vector3(locomotor.dest:GetPoint())
+    -- Only replace the final approach when the target moves. A static endpoint
+    -- may approach a shoreline tangentially rather than along the current ray.
     return Approach(state.context, locomotor.inst:GetPosition(), goal, locomotor.arrive_dist)
 end
 
@@ -547,6 +736,13 @@ function M.Attach(inst)
     local onupdate, stop = locomotor.OnUpdate, locomotor.Stop
     local clear, wants_to_move_forward = locomotor.Clear, locomotor.WantsToMoveForward
     local set_move_dir, set_motor_speed = locomotor.SetMoveDir, locomotor.SetMotorSpeed
+    locomotor.ac_can_interact = function(self, target)
+        local point, goal = inst:GetPosition(), target:GetPosition()
+        -- Arrival clears the route before the work animation. Rebuild a small
+        -- contact snapshot; the former route snapshot cannot validate new walls.
+        local context = Context(inst, math.sqrt(DistanceSq(point, goal)), target, point)
+        return InteractionClear(context, point, goal)
+    end
     locomotor.FindPath = FindPath
     locomotor.Stop = function(self, ...)
         CancelSearch(self._ac_navigation)
@@ -601,16 +797,13 @@ function M.Attach(inst)
                 or (platform ~= nil and not platform:IsValid()) then Reject(self, "platform_changed") return end
             if platform ~= nil and self.path ~= nil then
                 state.context.home = inst.components.ac_worker:GetHome()
-                for _, blocker in ipairs(state.context.blockers) do
-                    local point = WorldPoint(platform, blocker.localpos)
-                    blocker.x, blocker.z = point.x, point.z
-                end
                 for i, point in ipairs(state.localsteps) do
                     self.path.steps[i] = WorldPoint(platform, point)
                 end
             end
             local time = GetTime()
-            if not state.validate and not state.refreshing and not arrive_check_only and time >= state.nextcheck then
+            if not state.refreshing and not arrive_check_only
+                and ((not state.validate and time >= state.nextcheck) or time - state.snapshot_time >= MAX_SNAPSHOT_AGE) then
                 state.refreshing = true
                 scheduler.refresh_tail = scheduler.refresh_tail + 1
                 scheduler.refresh_queue[scheduler.refresh_tail] = state
