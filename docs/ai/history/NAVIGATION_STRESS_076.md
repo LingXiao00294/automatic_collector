@@ -1,5 +1,7 @@
 # 0.7.6 大面积复杂路况测试与对抗审查
 
+本文归档 AI 独立审查、场景矩阵、复验和本机证据。命令、缓存路径与协作方式只适用于记录中的任务；当前可重复的回归入口见 [开发者测试指南](../../developer/TESTING.md)，尚未解决的问题见 [性能约束](../../developer/NAVIGATION_LIMITATIONS.md)。
+
 日期：2026-10-09。基线被测提交：`4c6743b`，分支：`codex/fix-narrow-corridor-entry`。下方原始诊断数据记录该提交的行为；其后的进展计时修复与复验见本节，不用修复前结果代表当前代码。
 
 ## 后续修复与复验
@@ -10,7 +12,7 @@
 
 当前正式回归入口：`uv run --locked python -m pytest tests/test_navigation.py -k progress_deadlines`。修复前的 `.cache/adversarial_review/verify.py` 包含预期旧失败的断言，仅用于下面的基线诊断，不是修复后应当通过的测试。修复后扩展结果保存于 `.cache/navigation_stress/results_progress.json`、`translations.json`、`multi.json`；多车与平移旧结果保留为同目录下的 `multi_baseline_4c6743b.json`、`translations_baseline_4c6743b.json`。
 
-受性能约束仍暂缓的问题、证据与后续验收要求已移入 [寻路性能约束与待改进问题](NAVIGATION_LIMITATIONS.md)。以下原始结论与数据保留作为修复前对照。
+受性能约束仍暂缓的问题、证据与后续验收要求已移入 [寻路性能约束与待改进问题](../../developer/NAVIGATION_LIMITATIONS.md)。以下原始结论与数据保留作为修复前对照。
 
 结论：普通密集障碍及部分大迷宫可以完成运输，但不能认定复杂路况全部通过。确认两项需要修复的问题：共享寻路队列会因固定总期限持续归零；正常行驶超过总期限后，仍有接收能力的箱子会被排除，导致货物落地。另复现了文档已声明的 4096 节点上限。
 
