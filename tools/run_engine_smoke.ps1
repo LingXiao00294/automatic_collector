@@ -26,7 +26,7 @@ if (Test-Path -LiteralPath $dataDirectory) {
 $exeName = 'dontstarve_dedicated_server_nullrenderer_x64.exe'
 Copy-Item -LiteralPath (Join-Path $GameRoot "bin64/$exeName") -Destination $binDirectory
 Get-ChildItem -LiteralPath (Join-Path $GameRoot 'bin64') -Filter '*.dll' | Copy-Item -Destination $binDirectory
-foreach ($name in @('modinfo.lua','modmain.lua','modicon.xml','modicon.tex','scripts','anim','images')) {
+foreach ($name in @('modinfo.lua','modmain.lua','modicon.xml','modicon.tex','scripts','anim','images','sound')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $modDirectory -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $modDirectory 'tests') | Out-Null
@@ -55,7 +55,7 @@ server_port = 10999
 authentication_port = 11998
 master_server_port = 11997
 '@
-Set-Content -LiteralPath (Join-Path $masterDirectory 'modoverrides.lua') -Value 'return { automatic_collector = { enabled = true } }' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $masterDirectory 'modoverrides.lua') -Value 'return { automatic_collector = { enabled = true, configuration_options = { matching_only = false } } }' -Encoding ascii
 Set-Content -LiteralPath (Join-Path $masterDirectory 'worldgenoverride.lua') -Value 'return { override_enabled = true, preset = "SURVIVAL_TOGETHER", overrides = { world_size = "small", season_start = "spring" } }' -Encoding ascii
 Push-Location $binDirectory
 try {
