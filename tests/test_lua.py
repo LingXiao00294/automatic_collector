@@ -37,6 +37,74 @@ def test_lua_51_syntax():
         assert not isinstance(result, tuple), f"{path}: {result}"
 
 
+@pytest.mark.parametrize("superseding_level", [None, 2, 3])
+def test_documented_capacity_upgrade(lua, superseding_level):
+    documentation = (ROOT / "docs/developer/API.md").read_text(encoding="utf-8")
+    capacity_section = documentation.split("容量升级预留接口", 1)[1]
+    example = capacity_section.split("```lua\n", 1)[1].split("```", 1)[0]
+    lua.execute('GLOBAL = _G; AUTOMATIC_COLLECTOR_API = require("ac_api")')
+    lua.globals().request_capacity_level = lua.execute(example + "\nreturn RequestCapacityLevel")
+    lua.globals().superseding_level = superseding_level
+    lua.execute("""
+        local Worker = require("components/ac_worker")
+        local Upgradable = require("components/ac_upgradable")
+        local inst = { components = { inventory = { maxslots = 1, itemslots = {} } }, events = {} }
+        function inst:IsValid() return true end
+        function inst:PushEvent(name, data)
+            table.insert(self.events, { name = name, level = data.level })
+        end
+        function inst:DoPeriodicTask(period, fn)
+            local task = {}
+            function task:Cancel() self.cancelled = true end
+            function task:Run() if not self.cancelled then fn(inst) end end
+            return task
+        end
+        inst.components.ac_worker = setmetatable({ inst = inst }, Worker)
+        inst.components.ac_upgradable = Upgradable(inst)
+        local worker = inst.components.ac_worker
+        local upgradable = inst.components.ac_upgradable
+        assert(request_capacity_level(inst, 3))
+        assert(upgradable:GetLevel("my_mod_capacity") == 3 and worker:GetCarrySlots() == 4)
+        local cargo = { prefab = "flint" }
+        inst.components.inventory.itemslots[4] = cargo
+
+        local applied, reason = request_capacity_level(inst, 0)
+        assert(not applied and reason == "WAITING_FOR_CARGO")
+        local initial_retry = inst._my_mod_capacity_retry
+        assert(initial_retry ~= nil)
+        initial_retry:Run()
+        assert(upgradable:GetLevel("my_mod_capacity") == 3 and worker:GetCarrySlots() == 4)
+        assert(inst.components.inventory.itemslots[4] == cargo and #inst.events == 1)
+
+        if superseding_level ~= nil then
+            local newer_applied, newer_reason = request_capacity_level(inst, superseding_level)
+            assert(initial_retry.cancelled)
+            if superseding_level == 2 then
+                assert(not newer_applied and newer_reason == "WAITING_FOR_CARGO")
+                assert(inst._my_mod_capacity_retry ~= initial_retry and #inst.events == 1)
+            else
+                assert(newer_applied and inst._my_mod_capacity_retry == nil)
+            end
+            initial_retry:Run()
+            assert(upgradable:GetLevel("my_mod_capacity") == 3 and worker:GetCarrySlots() == 4)
+        end
+
+        inst.components.inventory.itemslots[4] = nil
+        local final_retry = inst._my_mod_capacity_retry
+        if final_retry ~= nil then final_retry:Run() end
+        local expected_level = superseding_level or 0
+        assert(upgradable:GetLevel("my_mod_capacity") == expected_level)
+        assert(worker:GetCarrySlots() == 1 + expected_level)
+        assert(inst._my_mod_capacity_retry == nil and #inst.events == 2)
+        assert(inst.events[2].name == "ac_upgradechanged" and inst.events[2].level == expected_level)
+        if final_retry ~= nil then
+            assert(final_retry.cancelled)
+            final_retry:Run()
+            assert(#inst.events == 2)
+        end
+    """)
+
+
 @pytest.mark.parametrize(
     "scenario",
     [

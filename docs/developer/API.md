@@ -53,19 +53,69 @@ local level = collector.components.ac_upgradable:GetLevel("my_mod_speed")
 容量升级预留接口（默认 1 组，内置套件不增加容量）：
 
 ```lua
-api.RegisterUpgrade("my_mod_capacity", {
-    maxlevel = 3,
-    apply = function(inst, level)
-        local accepted = inst.components.ac_worker:SetCarrySlots(1 + level)
-        -- 降级时若高位运输槽仍有货物，返回 false；卸货后由扩展重试。
-    end,
-})
-local slots = collector.components.ac_worker:GetCarrySlots()
+local api = GLOBAL.AUTOMATIC_COLLECTOR_API
+local upgrade_name = "my_mod_capacity"
+local maxlevel = 3
+
+if api ~= nil then
+    api.RegisterUpgrade(upgrade_name, {
+        maxlevel = maxlevel,
+        apply = function(inst, level)
+            inst.components.ac_worker:SetCarrySlots(1 + level)
+        end,
+    })
+end
+
+local function RequestCapacityLevel(inst, level)
+    if api == nil or GLOBAL.TheWorld == nil or not GLOBAL.TheWorld.ismastersim
+        or inst == nil or not inst:IsValid()
+        or type(level) ~= "number" or level ~= level
+        or level == math.huge or level == -math.huge then
+        return false, "INVALID_REQUEST"
+    end
+    local worker = inst.components.ac_worker
+    local upgradable = inst.components.ac_upgradable
+    if worker == nil or upgradable == nil or api.upgrades[upgrade_name] == nil then
+        return false, "INVALID_REQUEST"
+    end
+    level = math.max(0, math.min(maxlevel, math.floor(level)))
+
+    -- 最新的有效请求替换尚未完成的请求。
+    if inst._my_mod_capacity_retry ~= nil then
+        inst._my_mod_capacity_retry:Cancel()
+        inst._my_mod_capacity_retry = nil
+    end
+    local function TryApply()
+        -- 先确认实际槽位能调整，再提交等级；此过程不让出执行。
+        if not worker:SetCarrySlots(1 + level) then return false end
+        if inst._my_mod_capacity_retry ~= nil then
+            inst._my_mod_capacity_retry:Cancel()
+            inst._my_mod_capacity_retry = nil
+        end
+        return upgradable:SetLevel(upgrade_name, level)
+    end
+    if TryApply() then return true end
+
+    -- 闭包保留本次等级请求，每 .5 秒复查，成功后停止重试。
+    inst._my_mod_capacity_retry = inst:DoPeriodicTask(.5, TryApply)
+    return false, "WAITING_FOR_CARGO"
+end
 ```
+
+对该容量升级的安装、降级和撤销均调用 `RequestCapacityLevel`，不要绕过预检直接调用 `SetLevel`。例如，`collector` 为服务端小车实体时：
+
+```lua
+local applied, reason = RequestCapacityLevel(collector, 0)
+-- true：等级和容量均已更新。
+-- false, "WAITING_FOR_CARGO"：保留原等级及容量，卸货后自动重试。
+-- false, "INVALID_REQUEST"：未登记请求。
+```
+
+待重试请求只在当前实体存活期间保留；实体移除会取消其周期任务。需要在重载存档后继续请求的扩展，应自行保存请求等级，并在载入组件与升级注册就绪后重新调用此入口。材料消耗和成功提示应在实际等级提交后处理，等待期间不视为安装成功。
 
 `SetCarrySlots(count)` 接受有限数字，取整并限制为 `1..8`，返回是否接受。拒绝会截断现有货物的降级，不自动丢弃物品。容量随 `ac_worker` 存档保存，并在原版库存加载前恢复；注册升级也会在加载后重新应用等级。增加槽位后会逐个拾取及采集普通资源，分别合并各组可合并产物，装满可用槽位或没有更多合适目标后逐组卸货。农作物仍按批次采摘，实际产物完整落地，再利用运输槽分组收集。仍然不提供打开内部库存的界面。
 
-`SetLevel` 返回是否接受变更，将等级限制在整数 `0..maxlevel`，`0` 表示撤销。`apply(inst, level, previous_level)` 必须可重复执行，并处理 `level=0` 恢复默认值。载入存档会自动重新应用已注册升级；未注册的升级等级保留，扩展重新启用后可恢复。
+`SetLevel` 返回是否接受等级设置，将等级限制在整数 `0..maxlevel`，`0` 表示撤销。它先记录等级，再执行 `apply` 并发送 `ac_upgradechanged`；不读取 `apply` 的返回值，也不因回调返回 `false` 回滚等级。因此返回 `true` 不保证扩展效果已成功应用，需要拒绝变更的扩展应在调用前完成预检。`apply(inst, level, previous_level)` 必须可重复执行，并处理 `level=0` 恢复默认值。载入存档会自动重新应用已注册升级；未注册的升级等级保留，扩展重新启用后可恢复。
 
 升级应自行处理材料消耗、RPC、玩家操作和网络同步。不要跳过状态机动画或直接批量采集。速度接口为绝对倍率（限制 `.25..4`），多个扩展若同时改同一速度，需要自行合并。动作速度同时改变动画播放和接触时刻，保持二者同步。
 
