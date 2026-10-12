@@ -5,12 +5,14 @@ local API = require("ac_api")
 local Features = require("ac_features")
 local Controls = require("ac_controls")
 local PAGE_SIZE = 3
+-- Shared across instances: delayed replies from closed panels cannot reuse an ID.
+local next_request_id = 0
 
 local Panel = Class(Screen, function(self, owner, target, request, onclose)
     Screen._ctor(self, "AC_ControlPanel")
     self.owner, self.target = owner, target
     self.request, self.onclose = request, onclose
-    self.page, self.pending, self.refresh_time, self.request_id = 1, {}, 0, 0
+    self.page, self.pending, self.refresh_time = 1, {}, 0
     self.state_revision, self.values = -1, {}
     self.black = self:AddChild(TEMPLATES.BackgroundTint())
     self.root = self:AddChild(TEMPLATES.ScreenRoot())
@@ -61,11 +63,12 @@ function Panel:ToggleFeature(name)
     -- second click even before the server's first reply arrives.
     if pending ~= nil then current = pending.value end
     local value = not current
-    self.request_id = self.request_id + 1
-    self.pending[name] = { value = value, id = self.request_id, untiltime = GetStaticTime() + 3 }
+    next_request_id = next_request_id + 1
+    local request_id = next_request_id
+    self.pending[name] = { value = value, id = request_id, untiltime = GetStaticTime() + 3 }
     self.summary:SetString("各项独立保存；拾取与运输持续工作。")
     self:Refresh()
-    self.request(self.target, name, value, self.request_id)
+    self.request(self.target, name, value, request_id)
 end
 
 function Panel:ReadState(snapshot)

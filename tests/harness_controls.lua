@@ -198,6 +198,126 @@ function scenarios.feature_extensions_and_adapter_gating()
     assert(not Features.GetPreference(client, "water_plants"))
 end
 
+local function farm_extension_worker()
+    API.RegisterFeature("farm_extension", { label = "扩展作物", default = false, order = 40 })
+    API.RegisterAdapter("farm_extension", {
+        feature = "farm_extension",
+        match = function(_, target)
+            return target:HasTag("farm_extension_target") and target.components.pickable:CanBePicked()
+        end,
+        action = function() return ACTIONS.PICK end,
+        product = function() error("Farm adapters must not predict harvest products") end,
+    })
+    local w = H.setup()
+    w:SetHarvestEnabled(false)
+    assert(w:SetFeatureEnabled("farm_extension", true))
+    return w
+end
+
+local function farm_extension_target(x, marker)
+    local target = H.plant(x)
+    target:AddTag("farm_extension_target")
+    if marker == "farm_plant" or marker == "medal_fruit_tree" then target:AddTag(marker)
+    else target.components[marker] = {} end
+    return target
+end
+
+function scenarios.feature_farm_adapters_schedule_and_drain()
+    local w = farm_extension_worker()
+    local targets = {}
+    for index, marker in ipairs({ "farm_plant", "crop", "perennialcrop", "perennialcrop2", "medal_fruit_tree", "farm_plant" }) do
+        targets[index] = farm_extension_target(index / 10, marker)
+    end
+    for index = 1, 5 do
+        local action = w:GetNextAction()
+        assert(action ~= nil and action.target == targets[index], "An enabled farm adapter must run with built-in crops disabled")
+        assert(w.pending.feature == "farm_extension" and w.pending.farm)
+        H.execute(w, action)
+    end
+    assert(w.farm_count == 5 and w.farm_draining and targets[6].harvests == nil)
+    local stored = false
+    for _ = 1, 12 do
+        local action = w:GetNextAction()
+        assert(action ~= nil)
+        if action.target == targets[6] then
+            assert(stored, "The sixth adapted crop must wait for batch delivery")
+            H.execute(w, action)
+            break
+        end
+        assert(w.pending.kind == "pickup" or w.pending.kind == "store")
+        if w.pending.kind == "store" then stored = true end
+        H.execute(w, action)
+    end
+    assert(targets[6].harvests == 1 and w.farm_count == 1 and not w.farm_draining)
+    w:SetFeatureEnabled("farm_extension", false)
+    targets[6].components.pickable.mature = true
+    assert(Targets.Kind(w, targets[6]) == nil)
+end
+
+function scenarios.feature_farm_adapter_batch_save_pause_resume()
+    local w = farm_extension_worker()
+    local target = farm_extension_target(.2, "farm_plant")
+    local action = w:GetNextAction()
+    assert(action ~= nil and action.target == target, "An independently enabled farm adapter must be scheduled")
+    H.execute(w, action)
+    assert(w.farm_count == 1 and not w.farm_draining)
+    w:SetFeatureEnabled("farm_extension", false)
+    w:SetFeatureEnabled("pick_plants", true)
+    action = w:GetNextAction()
+    assert(action ~= nil and w.pending.kind == "pickup" and w.farm_count == 1 and not w.farm_draining)
+    w:Cancel(true)
+    local data = w:OnSave()
+    data.farm_features.farm_extension = false
+    assert(w.farm_features.farm_extension, "Saved batch features must not alias live state")
+    data = w:OnSave()
+    data.farm_features.absent_extension = true
+    data.farm_features["invalid-name"] = true
+    local restored = H.worker()
+    restored:OnLoad(data)
+    assert(restored.farm_features.farm_extension and restored:OnSave().farm_features.absent_extension)
+    assert(restored.farm_features["invalid-name"] == nil)
+    action = restored:GetNextAction()
+    assert(action ~= nil and restored.pending.kind == "pickup" and restored.farm_count == 1 and not restored.farm_draining)
+    restored:Cancel(true)
+    restored:SetFeatureEnabled("farm_extension", true)
+    action = restored:GetNextAction()
+    assert(action ~= nil and restored.pending.kind == "pickup" and restored.farm_draining,
+        "An enabled adapter must finish a short batch even after its last target becomes immature")
+    H.execute(restored, action)
+    action = restored:GetNextAction()
+    assert(action ~= nil and restored.pending.kind == "store")
+    H.execute(restored, action)
+    restored:GetNextAction()
+    assert(restored.farm_count == 0 and not restored.farm_draining and next(restored.farm_features) == nil)
+    local legacy = H.worker(100)
+    legacy:OnLoad({ enabled = true, harvest_enabled = false, farm_count = 3, farm_draining = true })
+    assert(legacy.farm_features.harvest_crops and legacy.farm_count == 3 and legacy.farm_draining)
+    restored.farm_features.farm_extension = true
+    restored:OnPickup(nil)
+    restored:OnDropped()
+    assert(next(restored.farm_features) == nil)
+end
+
+function scenarios.feature_farm_adapter_resumes_frozen_drain()
+    local w = farm_extension_worker()
+    w.farm_count, w.farm_draining = 5, true
+    w.farm_features.harvest_crops = true
+    local target = farm_extension_target(.2, "crop")
+    local drop = H.item("cutgrass", .1, nil, 3)
+    local action = w:GetNextAction()
+    assert(action ~= nil and action.target == drop and w.farm_count == 5 and w.farm_draining)
+    H.execute(w, action)
+    action = w:GetNextAction()
+    assert(action ~= nil and w.pending.kind == "store")
+    H.execute(w, action)
+    action = w:GetNextAction()
+    assert(action ~= nil and action.target == target and w.pending.feature == "farm_extension",
+        "A newly enabled farm adapter must resume a batch paused by another feature")
+    assert(w.farm_count == 0 and not w.farm_draining)
+    H.execute(w, action)
+    assert(target.harvests == 1 and w.farm_count == 1 and w.farm_features.farm_extension)
+end
+
 local function control_session(config)
     local callbacks = H.register_modmain(config)
     local w = H.setup()
@@ -457,4 +577,54 @@ function scenarios.control_panel_rejection_and_no_reply()
     assert(not panel.rows[2].button.disabled)
     GetStaticTime = static_time
     panel:Close()
+end
+
+function scenarios.control_panel_reopen_ignores_old_results()
+    local callbacks, w, player = control_session()
+    widget_runtime()
+    ThePlayer = player
+    local client = H.entity("automatic_collector_mk2", 0, { "automatic_collector" })
+    client._ac_mk2:set(true)
+    local requests = {}
+    SendModRPCToServer = function(id, _, name, value, request_id)
+        if id.name == "SetFeature" then
+            table.insert(requests, { name = name, value = value, request_id = request_id })
+        end
+    end
+    for _, accepted in ipairs({ 1, 0 }) do
+        w:SetFeatureEnabled("harvest_crops", false)
+        client._ac_features:set(w.inst._ac_features:value())
+        assert(Controls.BeginSession(player, w.inst))
+        callbacks["CLIENT_RPC:OpenPanel"](client)
+        local old_panel = Controls.screen
+        old_panel.rows[1].button.onclick()
+        local old_request = requests[#requests]
+        assert(old_request.value == 1)
+        if accepted == 1 then
+            assert(callbacks["SERVER_RPC:SetFeature"](player, w.inst, old_request.name, old_request.value, old_request.request_id))
+        else
+            -- Another player can enable the feature while this request is rejected.
+            w:SetFeatureEnabled("harvest_crops", true)
+        end
+        local old_snapshot = w.inst._ac_features:value()
+        client._ac_features:set(old_snapshot)
+        old_panel:Close()
+        callbacks["SERVER_RPC:ClosePanel"](player, w.inst)
+        assert(Controls.BeginSession(player, w.inst))
+        callbacks["CLIENT_RPC:OpenPanel"](client)
+        local panel = Controls.screen
+        panel.rows[1].button.onclick()
+        local request = requests[#requests]
+        assert(request.value == 0)
+        callbacks["CLIENT_RPC:FeatureResult"](client, old_request.name, old_request.request_id, accepted, old_snapshot)
+        assert(panel.pending.harvest_crops ~= nil and panel.pending.harvest_crops.id == request.request_id,
+            "A delayed response from the closed panel must not clear the new request")
+        assert(request.request_id > old_request.request_id and panel.rows[1].button.text == "采集作物：关闭")
+        assert(not panel.summary.text:find("设置未生效"))
+        assert(callbacks["SERVER_RPC:SetFeature"](player, w.inst, request.name, request.value, request.request_id))
+        callbacks["CLIENT_RPC:FeatureResult"](client, request.name, request.request_id, 1, w.inst._ac_features:value())
+        assert(panel.pending.harvest_crops == nil and panel.rows[1].button.text == "采集作物：关闭")
+        panel:Close()
+        callbacks["SERVER_RPC:ClosePanel"](player, w.inst)
+    end
 end

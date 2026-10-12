@@ -274,6 +274,18 @@ function M.HasHarvestDestination(worker, target, kind)
     return false
 end
 
+function M.HasFarmWork(worker, entities)
+    -- Query feature eligibility without the batch-phase guard in CanHarvest.
+    -- A newly enabled adapter can resume draining before it starts harvesting.
+    for _, target in ipairs(entities or M.GetWorkEntities(worker)) do
+        if M.IsAvailable(worker, target) and not worker:IsCoolingDown(target) then
+            local kind, action = M.Kind(worker, target)
+            if kind ~= nil and action ~= nil and M.IsFarmWork(target, kind) then return true end
+        end
+    end
+    return false
+end
+
 function M.FindWork(worker, mode, entities)
     local best, bestkind, bestaction, bestscore
     local priority = { pickup = 0, hammer = 1, pick = 2, harvest = 2 }

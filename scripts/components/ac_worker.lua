@@ -31,6 +31,7 @@ local Worker = Class(function(self, inst)
     self.blocked = false
     self.farm_count = 0
     self.farm_draining = false
+    self.farm_features = {}
     self:SyncFeatures()
     self:RefreshWatchdog()
 end)
@@ -286,6 +287,7 @@ function Worker:Finish(action, success)
         self:DropHarvestCargo()
         if success then
             self.farm_count = self.farm_count + 1
+            self.farm_features[self.pending.feature or "harvest_crops"] = true
             if self.farm_count >= 5 then self.farm_draining = true end
         end
     elseif success and (action.action == ACTIONS.PICK or action.action == ACTIONS.HARVEST) then
@@ -493,9 +495,20 @@ function Worker:GetNextAction(allow_return)
         self:Trace("scan", nil, "entities=" .. tostring(#entities))
     end
     local farming = self:IsFeatureEnabled("harvest_crops")
-    if farming and cargo == nil and not self.farm_draining then
+    if not farming then
+        for name in pairs(self.farm_features) do
+            if self:IsFeatureEnabled(name) then farming = true break end
+        end
+    end
+    if not farming and cargo == nil and self.farm_draining then
+        farming = Targets.HasFarmWork(self, entities)
+    end
+    if self:IsHarvestEnabled() and cargo == nil and not self.farm_draining then
         target, kind, action = Targets.FindWork(self, "farm", entities)
-        if target == nil and self.farm_count > 0 then
+        -- Kind checks each adapter's own feature. A newly enabled farm adapter
+        -- can start/resume the batch independently of the built-in crop toggle.
+        farming = farming or target ~= nil and Targets.IsFarmWork(target, kind)
+        if farming and target == nil and self.farm_count > 0 then
             -- Finish a short batch when no mature crop remains.
             self.farm_draining = true
         end
@@ -505,7 +518,7 @@ function Worker:GetNextAction(allow_return)
         if target == nil and cargo == nil then
             -- Leave currently undeliverable drops on the ground and resume work.
             -- Capacity and target availability are checked again on future scans.
-            self.farm_draining, self.farm_count = false, 0
+            self.farm_draining, self.farm_count, self.farm_features = false, 0, {}
             target, kind, action = Targets.FindWork(self, "farm", entities)
         end
     end
@@ -559,7 +572,7 @@ end
 function Worker:OnPickup(owner)
     self:Cancel()
     self.home, self.homeplatform, self.homelocal = nil, nil, nil
-    self.farm_count, self.farm_draining = 0, false
+    self.farm_count, self.farm_draining, self.farm_features = 0, false, {}
     self:SyncHome()
     local inventory = self.inst.components.inventory
     while self:GetCargo() ~= nil do
@@ -581,7 +594,7 @@ end
 function Worker:OnDropped()
     self:Cancel()
     self:SetHome()
-    self.farm_count, self.farm_draining = 0, false
+    self.farm_count, self.farm_draining, self.farm_features = 0, false, {}
     self.cooldowns = setmetatable({}, { __mode = "k" })
     self.pathfails = setmetatable({}, { __mode = "k" })
     self.navigation_failures = setmetatable({}, { __mode = "k" })
@@ -597,6 +610,8 @@ function Worker:OnSave()
         farm_count = self.farm_count, farm_draining = self.farm_draining }
     data.feature_enabled = {}
     for name, value in pairs(self.feature_enabled) do data.feature_enabled[name] = value end
+    data.farm_features = {}
+    for name, value in pairs(self.farm_features) do data.farm_features[name] = value end
     if self.home ~= nil then
         data.home = { x = self.home.x, z = self.home.z }
     end
@@ -632,6 +647,15 @@ function Worker:OnLoad(data)
     self.farm_count = type(count) == "number" and count == count
         and math.max(0, math.min(5, math.floor(count))) or 0
     self.farm_draining = data.farm_draining == true or self.farm_count >= 5
+    self.farm_features = {}
+    if type(data.farm_features) == "table" then
+        for name, value in pairs(data.farm_features) do
+            if API.IsFeatureName(name) and value == true then self.farm_features[name] = true end
+        end
+    elseif self.farm_count > 0 or self.farm_draining then
+        -- Earlier saves only scheduled batches through the built-in crop toggle.
+        self.farm_features.harvest_crops = true
+    end
     self.inst._ac_enabled:set(self.enabled)
     self:SyncFeatures()
     if data.home ~= nil then

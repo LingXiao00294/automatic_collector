@@ -262,11 +262,15 @@ def test_documented_capacity_upgrade(lua, superseding_level):
         "feature_changes_cancel_only_own_work",
         "feature_preferences_save_migrate_and_resume",
         "feature_extensions_and_adapter_gating",
+        "feature_farm_adapters_schedule_and_drain",
+        "feature_farm_adapter_batch_save_pause_resume",
+        "feature_farm_adapter_resumes_frozen_drain",
         "control_panel_rpc_validation_and_multiple_players",
         "control_panel_respects_configuration_and_lifecycle",
         "control_panel_client_sync_pagination_and_close",
         "control_panel_numeric_false_and_rapid_clicks",
         "control_panel_rejection_and_no_reply",
+        "control_panel_reopen_ignores_old_results",
     ],
 )
 def test_scenario(lua, scenario):
