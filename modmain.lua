@@ -2,6 +2,7 @@ PrefabFiles = { "automatic_collector", "ac_upgrade_kit" }
 
 local G = GLOBAL
 local Upgrades = require("ac_upgrades")
+local Controls = require("ac_controls")
 G.TUNING.AUTOMATIC_COLLECTOR = {
     radius = GetModConfigData("work_radius") or 12,
     new_navigation = GetModConfigData("new_navigation") ~= false,
@@ -121,33 +122,30 @@ end)
 AddStategraphActionHandler("wilson", G.ActionHandler(upgrade, "doshortaction"))
 AddStategraphActionHandler("wilson_client", G.ActionHandler(upgrade, "doshortaction"))
 
-local toggle = AddAction("AC_TOGGLE", "切换采集", function(act)
-    local worker = act.target ~= nil and act.target.components.ac_worker or nil
-    if worker == nil or not act.target:IsValid() or not Upgrades.IsAdvanced(act.target)
-        or act.target:HasTag("INLIMBO") or act.target.components.inventoryitem:IsHeld() then
-        return false
-    end
-    worker:SetHarvestEnabled(not worker.harvest_enabled)
-    return true
+AddModRPCHandler(Controls.NAMESPACE, "SetFeature", Controls.SetFeature)
+AddModRPCHandler(Controls.NAMESPACE, "ClosePanel", Controls.EndSession)
+AddClientModRPCHandler(Controls.NAMESPACE, "OpenPanel", Controls.OpenPanel)
+AddClientModRPCHandler(Controls.NAMESPACE, "FeatureResult", Controls.FeatureResult)
+
+local panel = AddAction("AC_CONTROL_PANEL", "控制面板", function(act)
+    return Controls.BeginSession(act.doer, act.target)
 end)
-toggle.priority = 2
-toggle.rmb = true
-toggle.mount_valid = true
-toggle.strfn = function(act)
-    return act.target ~= nil and act.target._ac_harvest_enabled:value() and "STOP" or "START"
-end
-strings.ACTIONS.AC_TOGGLE = { STOP = "关闭采集", START = "开启采集" }
+panel.priority = 2
+panel.rmb = true
+panel.mount_valid = true
+panel.distance = 2
 AddComponentAction("SCENE", "inspectable", function(inst, doer, actions, right)
-    local inventory = doer ~= nil and doer.replica.inventory or nil
+    local inventory = doer ~= nil and doer.replica ~= nil and doer.replica.inventory or nil
     local active = inventory ~= nil and inventory:GetActiveItem() or nil
     if active ~= nil and active:HasTag("ac_upgrade_kit") then return end
-    if right and inst:HasTag("automatic_collector") and Upgrades.IsAdvanced(inst)
-        and not inst:HasTag("INLIMBO") then
-        table.insert(actions, toggle)
+    if right and doer ~= nil and doer:HasTag("player") and not doer:HasTag("playerghost")
+        and inst:HasTag("automatic_collector") and Upgrades.IsAdvanced(inst)
+        and not inst:HasTag("INLIMBO") and not inst:HasTag("fire") then
+        table.insert(actions, panel)
     end
 end)
-AddStategraphActionHandler("wilson", G.ActionHandler(toggle, "doshortaction"))
-AddStategraphActionHandler("wilson_client", G.ActionHandler(toggle, "doshortaction"))
+AddStategraphActionHandler("wilson", G.ActionHandler(panel, "doshortaction"))
+AddStategraphActionHandler("wilson_client", G.ActionHandler(panel, "doshortaction"))
 
 -- Internal action: no player handler/tool; one ram applies one native work unit.
 local hammer = AddAction("AC_HAMMER", "撞开巨大作物", function(act)

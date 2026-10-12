@@ -20,6 +20,7 @@ def lua():
     runtime.globals().TEST_ROOT = ROOT.as_posix()
     runtime.execute((ROOT / "tests/harness_upgrade.lua").read_text(encoding="utf-8"))
     runtime.execute((ROOT / "tests/harness_sounds.lua").read_text(encoding="utf-8"))
+    runtime.execute((ROOT / "tests/harness_controls.lua").read_text(encoding="utf-8"))
     return runtime
 
 
@@ -256,10 +257,144 @@ def test_documented_capacity_upgrade(lua, superseding_level):
         "upgrade_prefab_client_and_host",
         "upgrade_kit_preserves_stack_mod_settings",
         "collector_mouse_pickup",
+        "reserved_facilities_and_ground_materials",
+        "reserved_targets_revalidate_before_contact",
+        "feature_changes_cancel_only_own_work",
+        "feature_preferences_save_migrate_and_resume",
+        "feature_extensions_and_adapter_gating",
+        "control_panel_rpc_validation_and_multiple_players",
+        "control_panel_respects_configuration_and_lifecycle",
+        "control_panel_client_sync_pagination_and_close",
+        "control_panel_numeric_false_and_rapid_clicks",
+        "control_panel_rejection_and_no_reply",
     ],
 )
 def test_scenario(lua, scenario):
     lua.globals().scenarios[scenario]()
+
+
+@pytest.mark.parametrize("crops", [False, True])
+@pytest.mark.parametrize("plants", [False, True])
+@pytest.mark.parametrize("hammer", [False, True])
+def test_feature_combinations(lua, crops, plants, hammer):
+    lua.globals().scenarios.feature_combinations(crops, plants, hammer)
+
+
+@pytest.mark.parametrize("material", ["cutstone", "marble", "moonglass"])
+def test_native_sculpting_material_is_reserved(lua, material):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native pottery material check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        pickable_source = scripts.read("scripts/components/pickable.lua").decode("utf-8")
+        sculpting_source = scripts.read("scripts/prefabs/sculptingtable.lua").decode("utf-8")
+    lua.execute("""
+        package.loaded.prefabutil = true
+        Asset = function() return {} end
+        TECH = { SCULPTING_ONE = { SCULPTING = 1 }, SCULPTING_TWO = { SCULPTING = 2 } }
+        EntityScript = { is_instance = function() return true end }
+    """)
+    lua.globals().NativePickable = lua.execute(pickable_source, name="@native/pickable.lua")
+    lua.globals().NativeSculpting = lua.execute(
+        sculpting_source.split("local function fn()", 1)[0]
+        + "\nreturn { give = ongivenitem, take = onitemtaken }",
+        name="@native/sculptingtable.lua",
+    )
+    lua.globals().material = material
+    lua.execute("""
+        local H = upgrade_contract
+        local w = H.setup()
+        local wheel = H.entity("sculptingtable", 1, { "structure", "trader", "prototyper" })
+        wheel.RemoveTag = function(self, tag) self.tags[tag] = nil end
+        wheel.AnimState = { ClearOverrideSymbol = function() end, OverrideSymbol = function() end }
+        wheel.SoundEmitter = { PlaySound = function() end }
+        wheel.components.prototyper = { trees = {} }
+        wheel.components.pickable = NativePickable(wheel)
+        wheel.components.pickable.onpickedfn = NativeSculpting.take
+        NativeSculpting.give(wheel, nil, { prefab = material, HasTag = function() return false end })
+        local pickable = wheel.components.pickable
+        assert(pickable:CanBePicked() and pickable.caninteractwith and pickable.product == material)
+        assert(require("ac_targets").Kind(w, wheel) == nil and w:GetNextAction() == nil)
+        assert(pickable.product == material and pickable:CanBePicked())
+        -- Manual player picking still runs the original component without patches.
+        local player = H.entity("wilson", 0, { "player" })
+        player.components.inventory = H.inventory(player)
+        SpawnPrefab = function(prefab)
+            local item = H.item(prefab, 1)
+            item.components.inventoryitem.InheritWorldWetnessAtTarget = function() end
+            return item
+        end
+        assert(pickable:Pick(player))
+        assert(player.components.inventory:GetFirstItemInAnySlot().prefab == material)
+        assert(not pickable.caninteractwith)
+    """)
+
+
+def test_native_panel_rpc_transport(lua):
+    game_root = Path(
+        os.environ.get("DST_GAME_ROOT", "D:/Programs/Steam/steamapps/common/Don't Starve Together")
+    )
+    bundle = game_root / "data/databundles/scripts.zip"
+    if not bundle.is_file():
+        pytest.skip("Native panel RPC check requires installed DST scripts")
+    with ZipFile(bundle) as scripts:
+        source = scripts.read("scripts/networkclientrpc.lua").decode("utf-8").replace("\r", "")
+    bool_check = source.index("function checkbool(")
+    lua.execute(source[bool_check : source.index("\n", bool_check)], name="@native/checkbool.lua")
+    lua.execute('assert(checkbool(nil) and checkbool(false) and not checkbool("false"))')
+    lua.execute("""
+        PanelCallbacks = upgrade_contract.register_modmain()
+        MOD_RPC, MOD_RPC_HANDLERS, CLIENT_MOD_RPC, CLIENT_MOD_RPC_HANDLERS = {}, {}, {}, {}
+        RPC_Client_Queue = {}
+        RPC_QUEUE_RATE_LIMIT = 0
+        RPC_QUEUE_RATE_LIMIT_PER_MOD = 20
+        setmetadata = function() end
+    """)
+    for method in (
+        "AddModRPCHandler",
+        "AddClientModRPCHandler",
+        "SendModRPCToServer",
+        "SendModRPCToClient",
+        "HandleClientModRPC",
+        "GetModRPC",
+        "GetClientModRPC",
+    ):
+        start = source.index(f"function {method}(")
+        end = source.index("\nend", start) + len("\nend")
+        lua.execute(source[start:end], name=f"@native/networkclientrpc/{method}.lua")
+    lua.execute("""
+        local Controls = require("ac_controls")
+        local H = upgrade_contract
+        local w = H.setup()
+        local player = H.entity("wilson", 0, { "player" })
+        player.userid = "rpc_player"
+        local opened
+        AddModRPCHandler(Controls.NAMESPACE, "SetFeature", PanelCallbacks["SERVER_RPC:SetFeature"])
+        AddClientModRPCHandler(Controls.NAMESPACE, "OpenPanel", function(target) opened = target end)
+        TheNet = {
+            SendModRPCToClient = function(self, namespace, code, userid, target)
+                assert(userid == player.userid)
+                HandleClientModRPC(1, namespace, code, { target })
+            end,
+            SendModRPCToServer = function(self, namespace, code, target, name, value)
+                -- Match native optional-bool semantics: false may decode as nil.
+                -- Numeric 0 survives that normalization and explicitly disables work.
+                if value == false then value = nil end
+                assert(target == w.inst and name == "harvest_crops" and value == 0)
+                assert(MOD_RPC_HANDLERS[namespace][code](player, target, name, value))
+            end,
+        }
+        assert(Controls.BeginSession(player, w.inst))
+        local entry = RPC_Client_Queue[1]
+        assert(entry ~= nil and entry[3] == 1)
+        entry[1](unpack(entry[2]))
+        assert(opened == w.inst)
+        Controls.RequestFeature(w.inst, "harvest_crops", false)
+        assert(not w:IsFeatureEnabled("harvest_crops") and w:IsFeatureEnabled("pick_plants"))
+    """)
 
 
 def test_native_collector_crafting_filters(lua):

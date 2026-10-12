@@ -3,6 +3,7 @@ function Class(base, ctor)
     if ctor == nil then ctor, base = base, nil end
     local c = {}
     c.__index = c
+    c._ctor, c._base = ctor, base
     return setmetatable(c, { __index = base, __call = function(_, ...)
         local self = setmetatable({}, c)
         ctor(self, ...)
@@ -13,6 +14,7 @@ math.clamp = function(x, a, b) return math.max(a, math.min(b, x)) end
 local now = 0
 FRAMES = 1 / 30
 GetTime = function() return now end
+GetStaticTime = GetTime
 function Vector3(x, y, z)
     local v = { x = x, y = y, z = z }
     v.Get = function(self) return self.x, self.y, self.z end
@@ -100,6 +102,8 @@ local function entity(prefab, x, tags)
     end
     e._ac_enabled, e._ac_blocked = net(), net()
     e._ac_mk2, e._ac_harvest_enabled = net(), net()
+    e._ac_features = net()
+    e._ac_features:set("")
     e._ac_harvest_enabled:set(true)
     table.insert(entities, e)
     return e
@@ -1783,7 +1787,7 @@ function scenarios.insight_worker_information()
     local function description() return InsightCompat.Describe(w).description end
     assert(description():find("待机") and description():find("工作半径：12") and description():find("空载"))
     assert(description():find("采摘 0/5"))
-    assert(description():find("采集车") and description():find("采集：开启"))
+    assert(description():find("采集车") and description():find("采集作物：开启"))
     w:SetHarvestEnabled(false)
     assert(description():find("采集：关闭，仅拾取与运输") and not description():find("已暂停"))
     w:SetHarvestEnabled(true)

@@ -1,6 +1,52 @@
-# 扩展接口（VERSION = 1）
+# 扩展接口（VERSION = 2）
 
 模组初始化时导出 `GLOBAL.AUTOMATIC_COLLECTOR_API`，并可通过 `require("ac_api")` 访问。扩展模组应声明依赖/安排加载顺序，再注册接口。所有作业与升级变更只在 master simulation 上执行；客户端不应读取服务端组件。
+
+## 单车控制面板与功能注册
+
+地面采集车的右键动作 `AC_CONTROL_PANEL` 打开原版控件构成的客户端面板，内置三个独立功能。普通拾荒机不提供此面板；拾取与运输不属于可关闭的采集功能。
+
+| 功能标识 | 面板文字 | 目标 | 服务器上限配置 |
+| --- | --- | --- | --- |
+| `harvest_crops` | 采集作物 | `farm_plant`、`crop`、棱镜作物、勋章果树等农作物 | `pick_plants` |
+| `pick_plants` | 采集植物 | 草、树枝、浆果等普通资源 | `pick_plants` |
+| `hammer_giants` | 敲巨大作物 | 落地且未打蜡的巨大果实 | `hammer_giants` |
+
+`RegisterFeature(name, definition)` 新增或替换功能定义，必须在实体生成前、服务端与客户端初始化时一致注册。标识须以小写字母开头，仅含小写字母、数字和下划线，最长 48 字符。定义包含 `label`（必需字符串）、`description`（可选说明）、`default`（缺省 true）、`order`（有限数值，缺省 100）及 `config_key`（可选服务器配置名）。`config_key` 对应值为 false 时禁用能力；面板显示禁用原因，RPC 不允许开启。所有注册功能都要求采集车等级，不授予普通车额外能力。
+
+面板按 `order`、标识排序，每页最多三项，扩展功能自动分页。`GetFeatureNames()` 返回共享的只读顺序，`features` 只用于读取；不在扫描或交互查询中改动注册表。注册开关只提供选择、同步和存档，实际动作仍由适配器及状态图实现，例如：
+
+```lua
+local api = GLOBAL.AUTOMATIC_COLLECTOR_API
+if api ~= nil and api.VERSION >= 2 then
+    api.RegisterFeature("my_mod_resource", {
+        label = "采集特殊资源",
+        description = "仅处理扩展模组的成熟资源。",
+        default = false,
+        order = 100,
+        config_key = "pick_plants",
+    })
+    api.RegisterAdapter("my_mod_resource", {
+        feature = "my_mod_resource",
+        match = function(collector, target)
+            return target:HasTag("my_mod_ready_resource")
+                and target.components.harvestable ~= nil
+        end,
+        action = function() return GLOBAL.ACTIONS.HARVEST end,
+        product = function() return "my_mod_product", 1 end,
+    })
+end
+```
+
+`adapter.feature` 可绑定任意已注册标识；绑定的功能关闭时不会调用其 `match` / `action`。未填写时按目标类型归入农作物或普通植物。注册顺序可先适配器后功能，但须在实体工作前完成两者注册。未注册的标识保持禁用。
+
+组件 `GetFeatureEnabled(name)` 查询保存的偏好；`IsFeatureEnabled(name)` 同时检查偏好、升级和服务器配置；`SetFeatureEnabled(name, bool)` 返回是否接受设置，拒绝未知功能及非布尔值。关闭时仅取消该功能未完成的任务，不施加目标冷却；其他任务、真实货物与装箱开启窗口保持，作物批次在关闭作物期间冻结。
+
+RPC 命名空间为 `automatic_collector`。`OpenPanel` 是服务端向动作执行者发送的客户端 RPC；`SetFeature(target, name, value_code, request_id)` 与 `ClosePanel(target)` 是客户端向服务端的 RPC。开关在传输层明确使用数值 `0/1`，避免假值归一为 nil 后被严格布尔校验拒绝；直接调用 `ac_controls.SetFeature` 时仍兼容布尔值。服务端仅接受本玩家已打开的目标，复查有效、存活、地面采集车、同平台和 30 单位距离；打开动作另要求距车不超过 4 单位。客户端只读取网络字段并请求明确值，不写入组件，不运行采集。多个玩家可以同时设置同一辆车，按服务端收到请求的顺序生效。面板不会暂停世界或小车；目标收起、失效、玩家变成幽灵、换平台或超出距离后自动关闭。
+
+客户端按钮立即显示新选择并允许继续点击，后台保留每项最新请求编号。服务端通过 `FeatureResult(target, name, request_id, accepted_code, snapshot)` 返回结果，`accepted_code` 同样使用 `0/1`，`snapshot` 包含单调递增的实体生命周期修订号及完整偏好。客户端按修订号接受新状态，旧回执不能清除新请求，延迟到达的旧网络字段不能覆盖新回执；其他玩家的更新仍可生效。请求拒绝或超过 3 秒墙钟时间未收到结果时，恢复当前已知的服务端状态并显示失败提示。界面不显示“更新中”，不为等待回执禁用按钮。
+
+固定网络字段 `_ac_features` 在 `SetPristine` 前声明，保存带修订号的功能偏好字符串；客户端通过 `ac_features.GetPreference(inst, name)` 读取，不能改写。编码是内部格式，扩展应使用查询接口；旧版不带修订号的字符串按修订 0 解析，服务端修订号不作为玩家存档数据。新存档 `feature_enabled` 保存已知及暂未注册功能的布尔偏好，扩展暂时移除后再启用仍可恢复。旧存档的 `harvest_enabled` 迁移为所有内置功能相同的初始偏好；更早的完整暂停状态按既有规则迁移。
 
 ## 升级
 
@@ -151,11 +197,12 @@ end
 
 普通资源的空载适配器作业会使用 `product` 返回的主产物寻找匹配样品箱；若未提供，则沿用目标自身的标准产物信息。具有上述农作物标签或组件的适配目标改走农作物批次流程，实际回调给到小车的所有产物通过原版 `DropItem` 完整落地，稍后按真实物品规则拾取运输。
 
-本版本状态机支持 `PICKUP`、`PICK`、`HARVEST`、`STORE` 和内部 `AC_HAMMER`，自定义资源通常返回 `PICK` 或 `HARVEST`。额外动作需由扩展对 `SGac_collector` 添加 handler，并提供动作动画和验证。适配器按注册名称排序；标准处理优先。普通拾荒机只执行拾取与运输，不调用采摘适配器；采集车关闭单车采集或服务器“自动采摘与收获”配置后，也不调用采摘适配器。单车采集关闭时同时禁用巨大作物敲击。
+本版本状态机支持 `PICKUP`、`PICK`、`HARVEST`、`STORE` 和内部 `AC_HAMMER`，自定义资源通常返回 `PICK` 或 `HARVEST`。额外动作需由扩展对 `SGac_collector` 添加 handler，并提供动作动画和验证。适配器按注册名称排序；标准处理优先。普通拾荒机只执行拾取与运输，不调用采摘适配器；采集车按适配器对应功能的偏好和服务器配置调用，三个内置功能分别控制作物、普通植物与敲击。
 
 ## 容器与排除
 
 - 带 `ac_ignore` 的实体不参与任何自动工作。
+- 陶轮等建筑设施的 `pickable` 表示取物能力，不作为植物。采集目标排除 `structure`、`prototyper`、`trader`、`inventoryitemholder_take` 标签，以及容器、交易、制作站、晾晒、烹饪和展示组件；适配器也受此过滤。真正掉在地上的材料不按 prefab 排除。带父实体的物品不作为地面掉落物拾取。
 - 带 `ac_no_delivery` 的容器不会接收货物。
 - 默认接收 `container.type == "chest"`。其他安全的自定义容器可加 `ac_delivery_container`。
 - 容器依然必须具备开启能力（`canbeopened`）、非只读、非烹饪/晾晒设备、非角色限制、同一平台、在范围内，并通过原版 `CanAcceptCount`。不以 `CanOpen()` 或 `IsOpenedByOthers()` 排除当前已打开的接收箱，实际存放仍执行原版 `STORE`。
@@ -196,15 +243,15 @@ end
 
 ## 服务端组件与事件
 
-`ac_worker`：`GetHome()`、`SetHome()`、`GetCargo()`、`SetEnabled(bool)`、`IsHarvestEnabled()`、`SetHarvestEnabled(bool)`、`SetMoveSpeed(multiplier)`、`SetActionSpeed(multiplier)`、`GetCarrySlots()`、`SetCarrySlots(count)`。`GetCargo()` 返回当前待运输的一组货物，不是全部物品列表。运输槽由原版 `inventory` 持久化；不要给拾荒机增加可打开的 `container`。
+`ac_worker`：`GetHome()`、`SetHome()`、`GetCargo()`、`SetEnabled(bool)`、`GetFeatureEnabled(name)`、`IsFeatureEnabled(name)`、`SetFeatureEnabled(name, bool)`、`IsHarvestEnabled()`、`SetHarvestEnabled(bool)`、`SetMoveSpeed(multiplier)`、`SetActionSpeed(multiplier)`、`GetCarrySlots()`、`SetCarrySlots(count)`。`GetCargo()` 返回当前待运输的一组货物，不是全部物品列表。运输槽由原版 `inventory` 持久化；不要给拾荒机增加可打开的 `container`。
 
 内部调度接口 `GetNextAction(allow_return)` 默认兼容原有自动返程；传入 `false` 时只选择工作。`GetHomeAction()` 单独选择返程，内置 Brain 将其置于工作之后，使新工作可打断返程。不要从扩展代码同时提交多个动作。
 
 `SetDebugEnabled(bool)` 控制可选服务端诊断，默认关闭且不随存档保存。启用后记录扫描、任务选择、路径结果及动作成功/失败；扫描日志最多每秒一条。`GetDebugString()` 包含状态机状态、Brain 调度队列、扫描等待、返程状态、目标冷却和最近失败原因。示例见 [开发者指南](DEVELOPMENT.md#待机延迟诊断)。
 
-`IsHarvestEnabled()` 查询是否已升级且单车采集开启；具体采摘、收获与敲击还须通过对应服务器配置和目标验证。`SetHarvestEnabled(bool)` 保存单车采集偏好、同步 `_ac_harvest_enabled` 并解除扫描等待；关闭时仅以 `Cancel(true)` 取消采摘、收获、敲击及适配器任务，释放占用且不施加失败冷却，保持已有拾取/运输任务与货物。普通车即使设置为 true 也不能采集，升级后才应用该偏好。玩家 `AC_TOGGLE` 只对地面采集车提供，客户端提示读网络字段，服务端复查升级、有效性与是否已收起。
+`IsHarvestEnabled()` 保留兼容接口，查询是否已升级且至少一项已注册采集偏好开启；具体能力用 `IsFeatureEnabled(name)` 查询。`SetHarvestEnabled(bool)` 一次设置所有已注册功能，同步 `_ac_harvest_enabled` 和 `_ac_features` 并解除扫描等待，关闭时仍仅取消未完成的采集任务；玩家面板使用单项设置。普通车即使设置为 true 也不能采集，升级后应用已有偏好。`_ac_harvest_enabled` 表示所有已注册偏好的“任一开启”，不代表每项能力都已通过服务器配置。
 
-`SetEnabled(bool)` 保留为扩展的全部作业启停接口，玩家右键不再调用。存档新增 `harvest_enabled`：有该字段时分别恢复完整启停与采集偏好；旧存档缺少该字段时恢复完整作业，将原 `enabled=false` 迁移为关闭采集，保证普通拾荒机恢复拾取运输。迁移不依赖组件加载顺序，采集能力仍在升级等级生效后判断。
+`SetEnabled(bool)` 保留为扩展的全部作业启停接口，玩家面板不调用。新存档分别保存 `enabled`、`feature_enabled` 和兼容用的 `harvest_enabled`；旧存档有 `harvest_enabled` 时分别恢复完整启停与采集偏好，缺少时恢复完整作业，将原 `enabled=false` 迁移为关闭采集，保证普通拾荒机恢复拾取运输。迁移不依赖组件加载顺序，采集能力仍在升级等级生效后判断。
 
 服务端内部 `farm_count` 为本批成功采摘数，`farm_draining` 为拾取运输阶段标志，均随组件存档保存。失败、取消和敲击不增加计数；关闭采集、完整暂停与休眠保留进度，拾取或重新放置重置。关闭采集时的拾取运输不改变批次，开启后继续原阶段；采集偏好在重新放置后保留。仅供观察，扩展应避免直接改写批次状态。农作物动作完成时使用任务内保存的类型，避免第三方回调重生、移除植株组件后漏记或漏放下产物。
 
@@ -213,13 +260,14 @@ end
 | `ac_jobsuccess` | `{ target, action }` | 一个目标的动作完成 |
 | `ac_jobfailed` | `{ target, action }` | 作业失败或中断 |
 | `ac_enabledchanged` | `{ enabled }` | 扩展完整启停变化 |
-| `ac_harvestenabledchanged` | `{ enabled }` | 单车采集偏好变化 |
+| `ac_harvestenabledchanged` | `{ enabled }` | 批量设置采集，或单项设置改变“任一开启”状态 |
+| `ac_featurechanged` | `{ name, enabled }` | 单项采集偏好实际变化 |
 | `ac_upgradechanged` | `{ name, level }` | 升级等级变化 |
 
-目标可能在动作成功时已经移除，不要直接访问无效实体。`_ac_enabled`、`_ac_harvest_enabled`、`_ac_blocked` 是只读网络状态，不应由扩展客户端写入；`_ac_harvest_enabled` 为采集偏好，能力是否存在还需结合 `_ac_mk2`。
+目标可能在动作成功时已经移除，不要直接访问无效实体。`_ac_enabled`、`_ac_harvest_enabled`、`_ac_features`、`_ac_blocked` 是只读网络状态，不应由扩展客户端写入；采集能力仍须结合 `_ac_mk2` 及对应服务器配置。
 
 ## Insight 显示接入
 
 `ac_insight` 在 `AddSimPostInit` 中检测 `GLOBAL.Insight.API.V1`，注册 `ac_worker` 组件描述器及 `automatic_collector`、`automatic_collector_mk2` 两个 prefab 的 `OnSelect` / `OnUnselect`。不依赖工坊目录名，不导入或分发第三方脚本；未启用 Insight 时直接跳过。
 
-服务端描述器读取真实组件：普通拾荒机显示拾取与运输能力，采集车另显示采集开关及农作物批次进度与阶段；客户端范围显示只读取 `_ac_home_valid`、`_ac_home_x`、`_ac_home_z`、`_ac_home_platform`、`_ac_radius` 网络字段。无平台时坐标为世界坐标，有平台时为平台局部坐标；工作中心在放置、拾取和存档恢复时同步。范围圈使用客户端临时锚点，每 .1 秒更新平台位置，取消悬停或实体移除时清理，收起时隐藏。扩展客户端不得修改这些字段。
+服务端描述器读取真实组件：普通拾荒机显示拾取与运输能力，采集车按功能注册顺序显示各项实际状态及农作物批次进度与阶段；客户端范围显示只读取 `_ac_home_valid`、`_ac_home_x`、`_ac_home_z`、`_ac_home_platform`、`_ac_radius` 网络字段。无平台时坐标为世界坐标，有平台时为平台局部坐标；工作中心在放置、拾取和存档恢复时同步。范围圈使用客户端临时锚点，每 .1 秒更新平台位置，取消悬停或实体移除时清理，收起时隐藏。扩展客户端不得修改这些字段。

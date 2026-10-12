@@ -1,5 +1,6 @@
 local M = {}
 local Upgrades = require("ac_upgrades")
+local API = require("ac_api")
 local JOBS = { pickup = "拾取", pick = "采摘", harvest = "收获", hammer = "敲巨大作物", store = "运输" }
 
 function M.Describe(worker)
@@ -17,10 +18,16 @@ function M.Describe(worker)
         cargo_text = string.format("%s × %d", name, stack ~= nil and stack:StackSize() or 1)
     end
     local advanced = Upgrades.IsAdvanced(inst)
-    local collection = advanced and string.format("\n采集：%s\n农作物批次：%s",
-        worker:IsHarvestEnabled() and "开启" or "关闭，仅拾取与运输",
-        worker.farm_draining and "拾取与运输" or string.format("采摘 %d/5", worker.farm_count))
-        or "\n功能：拾取与运输"
+    local collection = "\n功能：拾取与运输"
+    if advanced then
+        collection = worker:IsHarvestEnabled() and "\n采集：按功能设置" or "\n采集：关闭，仅拾取与运输"
+        for _, name in ipairs(API.GetFeatureNames()) do
+            collection = collection .. string.format("\n%s：%s", API.features[name].label,
+                worker:IsFeatureEnabled(name) and "开启" or "关闭")
+        end
+        collection = collection .. "\n农作物批次："
+            .. (worker.farm_draining and "拾取与运输" or string.format("采摘 %d/5", worker.farm_count))
+    end
     return {
         name = "ac_worker",
         priority = 10,
