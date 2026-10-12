@@ -433,7 +433,7 @@ local function prefab_runtime(stack_post_init, defer_tasks)
             value = v
         end }
     end
-    net_bool, net_float, net_entity = net, net, net
+    net_bool, net_float, net_entity, net_string = net, net, net, net
     package.loaded["prefabs/automatic_collector"] = nil
     local prefab, advanced = assert(loadfile(TEST_ROOT .. "/scripts/prefabs/automatic_collector.lua"))()
     package.loaded["prefabs/automatic_collector"] = prefab
@@ -624,6 +624,7 @@ function scenarios.collector_pristine_reload(origin, initial_phase, harvest_enab
                 client._ac_mk2:set_initial(server._ac_mk2:value())
             end
             client._ac_harvest_enabled:set_initial(server._ac_harvest_enabled:value())
+            client._ac_features:set_initial(server._ac_features:value())
             client.AnimState:SetBank(server.bank)
             client.AnimState:SetBuild(server.build)
         end
@@ -640,7 +641,7 @@ function scenarios.collector_pristine_reload(origin, initial_phase, harvest_enab
         local actions = {}
         callbacks["SCENE:inspectable"](client, player, actions, true)
         assert(#actions == (upgraded and 1 or 0))
-        if upgraded then assert(actions[1] == ACTIONS.AC_TOGGLE) end
+        if upgraded then assert(actions[1] == ACTIONS.AC_CONTROL_PANEL) end
         return client
     end
 
@@ -912,6 +913,17 @@ local function register_modmain(config)
     AddMinimapAtlas = function() end
     RegisterInventoryItemAtlas = function() end
     AddSimPostInit = function() end
+    AddModRPCHandler = function(namespace, name, fn)
+        callbacks["SERVER_RPC:" .. name] = fn
+    end
+    AddClientModRPCHandler = function(namespace, name, fn)
+        callbacks["CLIENT_RPC:" .. name] = fn
+    end
+    GetClientModRPC = function(namespace, name) return { namespace = namespace, name = name } end
+    GetModRPC = GetClientModRPC
+    SendModRPCToClient = function(id, userid, target)
+        callbacks.last_client_rpc = { id = id, userid = userid, target = target }
+    end
     AddRecipe2 = function(name, ingredients, tech, config, filters)
         recipes[name] = { ingredients = ingredients, tech = tech, config = config, filters = filters }
         if NativeCraftingRegistration ~= nil then
@@ -993,13 +1005,13 @@ function scenarios.upgrade_recipe_and_action_selection()
     player.replica = { inventory = player.components.inventory }
     local actions = {}
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
-    assert(#actions == 0, "Base cars must not offer a player toggle")
-    assert(not ACTIONS.AC_TOGGLE.fn({ doer = player, target = w.inst }) and w.enabled)
+    assert(#actions == 0, "Base cars must not offer harvest controls")
+    assert(not ACTIONS.AC_CONTROL_PANEL.fn({ doer = player, target = w.inst }) and w.enabled)
     player.components.inventory.active = kit
     callbacks["USEITEM:ac_upgradeitem"](kit, player, w.inst, actions, true)
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
     assert(#actions == 1 and actions[1] == ACTIONS.AC_UPGRADE)
-    assert(actions[1].priority > ACTIONS.AC_TOGGLE.priority)
+    assert(actions[1].priority > ACTIONS.AC_CONTROL_PANEL.priority)
     assert(actions[1].fn({ doer = player, target = w.inst, invobject = kit }))
     local ok, reason = actions[1].fn({ doer = player, target = w.inst, invobject = kit })
     assert(not ok and reason == "ALREADY_UPGRADED" and w.enabled)
@@ -1008,30 +1020,29 @@ function scenarios.upgrade_recipe_and_action_selection()
     assert(#actions == 0)
     player.components.inventory.active = nil
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
-    assert(#actions == 1 and actions[1] == ACTIONS.AC_TOGGLE)
-    assert(handlers["wilson:AC_TOGGLE"] == "doshortaction")
-    assert(handlers["wilson_client:AC_TOGGLE"] == "doshortaction")
-    assert(GLOBAL.STRINGS.ACTIONS.AC_TOGGLE.STOP == "关闭采集")
-    assert(GLOBAL.STRINGS.ACTIONS.AC_TOGGLE.START == "开启采集")
-    local toggle, act = actions[1], { doer = player, target = w.inst }
-    assert(toggle.strfn(act) == "STOP" and toggle.fn(act))
-    assert(w.enabled and not w.harvest_enabled and toggle.strfn(act) == "START")
-    assert(toggle.fn(act) and w.enabled and w:IsHarvestEnabled())
+    assert(#actions == 1 and actions[1] == ACTIONS.AC_CONTROL_PANEL)
+    assert(handlers["wilson:AC_CONTROL_PANEL"] == "doshortaction")
+    assert(handlers["wilson_client:AC_CONTROL_PANEL"] == "doshortaction")
+    local panel, act = actions[1], { doer = player, target = w.inst }
+    player.userid = "test_player"
+    assert(panel.fn(act))
+    assert(w.enabled and w.harvest_enabled and callbacks.last_client_rpc.target == w.inst)
+    assert(callbacks.last_client_rpc.userid == player.userid)
     w.inst.held = true
-    assert(not toggle.fn(act) and w.harvest_enabled)
+    assert(not panel.fn(act) and w.harvest_enabled)
     w.inst.held = false w.inst:AddTag("INLIMBO")
     actions = {}
     callbacks["SCENE:inspectable"](w.inst, player, actions, true)
-    assert(#actions == 0 and not toggle.fn(act))
+    assert(#actions == 0 and not panel.fn(act))
     w.inst.tags.INLIMBO = nil w.inst.valid = false
-    assert(not toggle.fn(act))
-    assert(not toggle.fn({ doer = player }))
+    assert(not panel.fn(act))
+    assert(not panel.fn({ doer = player }))
     local client = H.entity("automatic_collector", 0, { "automatic_collector" })
     client._ac_mk2:set(true) client._ac_harvest_enabled:set(false)
     actions = {}
     callbacks["SCENE:inspectable"](client, player, actions, true)
-    assert(#actions == 1 and toggle.strfn({ target = client }) == "START")
-    assert(not toggle.fn({ doer = player, target = client }))
+    assert(#actions == 1 and actions[1] == panel)
+    assert(not panel.fn({ doer = player, target = client }))
     actions = {}
     callbacks["SCENE:inspectable"](client, player, actions, false)
     assert(#actions == 0)

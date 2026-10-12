@@ -3,6 +3,7 @@ function Class(base, ctor)
     if ctor == nil then ctor, base = base, nil end
     local c = {}
     c.__index = c
+    c._ctor, c._base = ctor, base
     return setmetatable(c, { __index = base, __call = function(_, ...)
         local self = setmetatable({}, c)
         ctor(self, ...)
@@ -13,6 +14,7 @@ math.clamp = function(x, a, b) return math.max(a, math.min(b, x)) end
 local now = 0
 FRAMES = 1 / 30
 GetTime = function() return now end
+GetStaticTime = GetTime
 function Vector3(x, y, z)
     local v = { x = x, y = y, z = z }
     v.Get = function(self) return self.x, self.y, self.z end
@@ -100,6 +102,8 @@ local function entity(prefab, x, tags)
     end
     e._ac_enabled, e._ac_blocked = net(), net()
     e._ac_mk2, e._ac_harvest_enabled = net(), net()
+    e._ac_features = net()
+    e._ac_features:set("")
     e._ac_harvest_enabled:set(true)
     table.insert(entities, e)
     return e
@@ -1781,21 +1785,24 @@ function scenarios.insight_worker_information()
     STRINGS = {NAMES={CORN="玉米"}}
     local w = worker() w.config.matching_only = true
     local function description() return InsightCompat.Describe(w).description end
-    assert(description():find("待机") and description():find("工作半径：12") and description():find("空载"))
-    assert(description():find("采摘 0/5"))
-    assert(description():find("采集车") and description():find("采集：开启"))
+    local idle = "采集车：待机\n货物：空载\n运输槽：1"
+    assert(description() == idle)
     w:SetHarvestEnabled(false)
-    assert(description():find("采集：关闭，仅拾取与运输") and not description():find("已暂停"))
+    assert(description() == idle)
     w:SetHarvestEnabled(true)
-    w.farm_draining = true assert(description():find("农作物批次：拾取与运输"))
+    w:SetFeatureEnabled("pick_plants", false)
+    w.farm_count = 4 w.farm_draining = true
+    assert(description() == idle)
     w.farm_draining = false
     w.inst.components.inventory:GiveItem(item("corn",0,nil,7))
-    assert(description():find("玉米 × 7") and description():find("仅已有同类样品"))
+    assert(description() == "采集车：待机\n货物：玉米 × 7\n运输槽：1")
+    assert(w:SetCarrySlots(2))
+    assert(description() == "采集车：待机\n货物：玉米 × 7\n运输槽：2")
     w:SetEnabled(false) assert(description():find("已暂停"))
     w.inst.held = true assert(description():find("已收起"))
     w.inst.held = false w:SetEnabled(true) w.inst.asleep = true assert(description():find("休眠"))
     local base = InsightCompat.Describe(worker(100, false)).description
-    assert(base:find("拾荒机") and base:find("功能：拾取与运输") and not base:find("农作物批次"))
+    assert(base == "拾荒机：待机\n货物：空载\n运输槽：1")
 end
 
 local function range_nets(w)

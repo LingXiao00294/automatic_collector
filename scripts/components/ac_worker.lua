@@ -1,5 +1,7 @@
 local Targets = require("ac_targets")
 local Upgrades = require("ac_upgrades")
+local API = require("ac_api")
+local Features = require("ac_features")
 local SCAN_INTERVAL = .5
 -- A failed plan says nothing about the target itself, so it starts on a short
 -- backoff and only reaches retry_delay after repeated failures.
@@ -15,6 +17,7 @@ local Worker = Class(function(self, inst)
     self.radius = self.config.radius
     self.enabled = true
     self.harvest_enabled = true
+    self.feature_enabled = Features.Defaults()
     self.home = nil
     self.homeplatform = nil
     self.homelocal = nil
@@ -28,6 +31,8 @@ local Worker = Class(function(self, inst)
     self.blocked = false
     self.farm_count = 0
     self.farm_draining = false
+    self.farm_features = {}
+    self:SyncFeatures()
     self:RefreshWatchdog()
 end)
 
@@ -152,7 +157,7 @@ function Worker:GetPickupCount(target)
 end
 
 function Worker:CanHarvest(target, kind)
-    if not self:IsHarvestEnabled() then return false end
+    if not self:IsFeatureEnabled(Targets.WorkFeature(target, kind)) then return false end
     if kind == "hammer" then return self:GetCargo() == nil end
     if Targets.IsFarmWork(target, kind) then
         -- Products are harvested to the ground. Only real pickup/delivery checks
@@ -282,6 +287,7 @@ function Worker:Finish(action, success)
         self:DropHarvestCargo()
         if success then
             self.farm_count = self.farm_count + 1
+            self.farm_features[self.pending.feature or "harvest_crops"] = true
             if self.farm_count >= 5 then self.farm_draining = true end
         end
     elseif success and (action.action == ACTIONS.PICK or action.action == ACTIONS.HARVEST) then
@@ -349,16 +355,58 @@ function Worker:IsHarvestEnabled()
 end
 
 function Worker:SetHarvestEnabled(value)
-    self.harvest_enabled = value == true
+    -- Backwards-compatible bulk interface; player controls use individual features.
+    for _, name in ipairs(API.GetFeatureNames()) do self.feature_enabled[name] = value == true end
+    self:SyncFeatures()
+    self:RefreshFeatureWork()
+    self.inst:PushEvent("ac_harvestenabledchanged", { enabled = self.harvest_enabled })
+end
+
+function Worker:GetFeatureEnabled(name)
+    local definition = API.features[name]
+    if definition == nil then return false end
+    local value = self.feature_enabled[name]
+    return value == nil and definition.default ~= false or value == true
+end
+
+function Worker:IsFeatureEnabled(name)
+    return self:IsHarvestEnabled() and Features.IsAllowed(name, self.config) and self:GetFeatureEnabled(name)
+end
+
+function Worker:SyncFeatures()
+    self.feature_revision = (self.feature_revision or 0) + 1
+    self.harvest_enabled = false
+    for _, name in ipairs(API.GetFeatureNames()) do
+        if self:GetFeatureEnabled(name) then self.harvest_enabled = true break end
+    end
     self.inst._ac_harvest_enabled:set(self.harvest_enabled)
-    if not self:IsHarvestEnabled() and self.pending ~= nil
-        and self.pending.kind ~= "pickup" and self.pending.kind ~= "store" then
-        -- Switching collection off releases only unfinished harvesting work.
+    if self.inst._ac_features ~= nil then
+        self.inst._ac_features:set(Features.Encode(self.feature_enabled, self.feature_revision))
+    end
+end
+
+function Worker:RefreshFeatureWork()
+    if self.pending ~= nil and self.pending.feature ~= nil
+        and not self:IsFeatureEnabled(self.pending.feature) then
+        -- Cancel only work belonging to the disabled feature, without cooldown.
         self:Cancel(true)
     end
     self.nextscan = 0
     self:WakeBrain()
-    self.inst:PushEvent("ac_harvestenabledchanged", { enabled = self.harvest_enabled })
+end
+
+function Worker:SetFeatureEnabled(name, value)
+    if API.features[name] == nil or type(value) ~= "boolean" then return false end
+    if self:GetFeatureEnabled(name) == value then return true end
+    local was_harvesting = self.harvest_enabled
+    self.feature_enabled[name] = value
+    self:SyncFeatures()
+    self:RefreshFeatureWork()
+    self.inst:PushEvent("ac_featurechanged", { name = name, enabled = value })
+    if was_harvesting ~= self.harvest_enabled then
+        self.inst:PushEvent("ac_harvestenabledchanged", { enabled = self.harvest_enabled })
+    end
+    return true
 end
 
 -- Upgrade hooks intentionally change timing rather than skip animations.
@@ -446,26 +494,37 @@ function Worker:GetNextAction(allow_return)
         self.next_debug_scan = GetTime() + 1
         self:Trace("scan", nil, "entities=" .. tostring(#entities))
     end
-    local harvesting = self:IsHarvestEnabled()
-    if harvesting and cargo == nil and not self.farm_draining then
+    local farming = self:IsFeatureEnabled("harvest_crops")
+    if not farming then
+        for name in pairs(self.farm_features) do
+            if self:IsFeatureEnabled(name) then farming = true break end
+        end
+    end
+    if not farming and cargo == nil and self.farm_draining then
+        farming = Targets.HasFarmWork(self, entities)
+    end
+    if self:IsHarvestEnabled() and cargo == nil and not self.farm_draining then
         target, kind, action = Targets.FindWork(self, "farm", entities)
-        if target == nil and self.farm_count > 0 then
+        -- Kind checks each adapter's own feature. A newly enabled farm adapter
+        -- can start/resume the batch independently of the built-in crop toggle.
+        farming = farming or target ~= nil and Targets.IsFarmWork(target, kind)
+        if farming and target == nil and self.farm_count > 0 then
             -- Finish a short batch when no mature crop remains.
             self.farm_draining = true
         end
     end
-    if harvesting and target == nil and self.farm_draining then
+    if farming and target == nil and self.farm_draining then
         target, kind, action = Targets.FindWork(self, "drain", entities)
         if target == nil and cargo == nil then
             -- Leave currently undeliverable drops on the ground and resume work.
             -- Capacity and target availability are checked again on future scans.
-            self.farm_draining, self.farm_count = false, 0
+            self.farm_draining, self.farm_count, self.farm_features = false, 0, {}
             target, kind, action = Targets.FindWork(self, "farm", entities)
         end
     end
     if target == nil then
         target, kind, action = Targets.FindWork(self,
-            (not harvesting or self.farm_draining) and "drain" or "normal", entities)
+            farming and self.farm_draining and "drain" or "normal", entities)
     end
     if cargo ~= nil then
         if target == nil then
@@ -501,6 +560,7 @@ function Worker:GetNextAction(allow_return)
         buffered.arrivedist = 1
     end
     self.pending = { action = buffered, kind = kind, claimtarget = target,
+        feature = Targets.WorkFeature(target, kind),
         farm = Targets.IsFarmWork(target, kind), started = GetTime() }
     buffered:AddSuccessAction(function() self:Finish(buffered, true) end)
     buffered:AddFailAction(function() self:Finish(buffered, false) end)
@@ -512,7 +572,7 @@ end
 function Worker:OnPickup(owner)
     self:Cancel()
     self.home, self.homeplatform, self.homelocal = nil, nil, nil
-    self.farm_count, self.farm_draining = 0, false
+    self.farm_count, self.farm_draining, self.farm_features = 0, false, {}
     self:SyncHome()
     local inventory = self.inst.components.inventory
     while self:GetCargo() ~= nil do
@@ -534,7 +594,7 @@ end
 function Worker:OnDropped()
     self:Cancel()
     self:SetHome()
-    self.farm_count, self.farm_draining = 0, false
+    self.farm_count, self.farm_draining, self.farm_features = 0, false, {}
     self.cooldowns = setmetatable({}, { __mode = "k" })
     self.pathfails = setmetatable({}, { __mode = "k" })
     self.navigation_failures = setmetatable({}, { __mode = "k" })
@@ -548,6 +608,10 @@ function Worker:OnSave()
     local data = { enabled = self.enabled, harvest_enabled = self.harvest_enabled,
         carryslots = self:GetCarrySlots(),
         farm_count = self.farm_count, farm_draining = self.farm_draining }
+    data.feature_enabled = {}
+    for name, value in pairs(self.feature_enabled) do data.feature_enabled[name] = value end
+    data.farm_features = {}
+    for name, value in pairs(self.farm_features) do data.farm_features[name] = value end
     if self.home ~= nil then
         data.home = { x = self.home.x, z = self.home.z }
     end
@@ -575,12 +639,25 @@ function Worker:OnLoad(data)
         self.enabled = data.enabled ~= false
         self.harvest_enabled = data.harvest_enabled ~= false
     end
+    self.feature_enabled = Features.Defaults(self.harvest_enabled)
+    for name, value in pairs(type(data.feature_enabled) == "table" and data.feature_enabled or {}) do
+        if API.IsFeatureName(name) and type(value) == "boolean" then self.feature_enabled[name] = value end
+    end
     local count = data.farm_count
     self.farm_count = type(count) == "number" and count == count
         and math.max(0, math.min(5, math.floor(count))) or 0
     self.farm_draining = data.farm_draining == true or self.farm_count >= 5
+    self.farm_features = {}
+    if type(data.farm_features) == "table" then
+        for name, value in pairs(data.farm_features) do
+            if API.IsFeatureName(name) and value == true then self.farm_features[name] = true end
+        end
+    elseif self.farm_count > 0 or self.farm_draining then
+        -- Earlier saves only scheduled batches through the built-in crop toggle.
+        self.farm_features.harvest_crops = true
+    end
     self.inst._ac_enabled:set(self.enabled)
-    self.inst._ac_harvest_enabled:set(self.harvest_enabled)
+    self:SyncFeatures()
     if data.home ~= nil then
         self.home = Vector3(data.home.x, 0, data.home.z)
     end

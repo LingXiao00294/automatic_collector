@@ -4,6 +4,18 @@ local Compat = require("ac_compat")
 local claims = setmetatable({}, { __mode = "k" })
 local EXCLUDE = { "INLIMBO", "FX", "NOCLICK", "DECOR", "fire", "outofreach", "ac_ignore" }
 local UNSAFE = { "irreplaceable", "catchable", "trap", "mineactive", "cursed", "spider", "heavy", "storagerobot", "automatic_collector" }
+local RESERVED_HARVEST = { "structure", "prototyper", "trader", "inventoryitemholder_take" }
+
+function M.IsHarvestTarget(target)
+    -- Facilities also expose PICK: e.g. a pottery wheel's material is its
+    -- pickable product, not a dropped inventory item. Leave manual take actions
+    -- and machine contents alone, regardless of their product prefab.
+    return not target:HasAnyTag(RESERVED_HARVEST)
+        and target.components.container == nil and target.components.trader == nil
+        and target.components.prototyper == nil and target.components.craftingstation == nil
+        and target.components.dryingrack == nil and target.components.stewer == nil
+        and target.components.inventoryitemholder == nil
+end
 
 function M.IsAvailable(worker, target)
     local claim = claims[target]
@@ -29,7 +41,7 @@ function M.IsSafe(worker, target, radius)
         return false
     end
     local item = target.components.inventoryitem
-    if item ~= nil and item:IsHeld() then
+    if item ~= nil and (item:IsHeld() or target.parent ~= nil) then
         return false
     end
     if target.components.burnable ~= nil and target.components.burnable:IsBurning() then
@@ -46,7 +58,7 @@ function M.Kind(worker, target)
         return nil
     end
     local workable = target.components.workable
-    if worker:IsHarvestEnabled() and worker.config.hammer_giants and target:HasTag("oversized_veggie")
+    if worker:IsFeatureEnabled("hammer_giants") and M.IsHarvestTarget(target) and target:HasTag("oversized_veggie")
         and not (target.prefab ~= nil and target.prefab:match("_waxed$")) and workable ~= nil
         and workable:CanBeWorked() and workable:GetWorkAction() == ACTIONS.HAMMER then
         return "hammer", ACTIONS.AC_HAMMER
@@ -59,21 +71,24 @@ function M.Kind(worker, target)
         and (target.components.projectile == nil or not target.components.projectile:IsThrown()) then
         return "pickup", ACTIONS.PICKUP
     end
-    if not worker:IsHarvestEnabled() or not worker.config.pick_plants or not M.IsSafe(worker, target) then
+    if not worker:IsHarvestEnabled() or not M.IsSafe(worker, target) or not M.IsHarvestTarget(target) then
         return nil
     end
     local pickable = target.components.pickable
-    if pickable ~= nil and pickable:CanBePicked() and pickable.caninteractwith
+    if worker:IsFeatureEnabled(M.WorkFeature(target, "pick"))
+        and pickable ~= nil and pickable:CanBePicked() and pickable.caninteractwith
         and not pickable:IsStuck() and not target:HasTag("skeleton") then
         return "pick", ACTIONS.PICK
     end
-    if target.components.crop ~= nil and target.components.crop.matured then
+    if worker:IsFeatureEnabled("harvest_crops")
+        and target.components.crop ~= nil and target.components.crop.matured then
         return "harvest", ACTIONS.HARVEST
     end
     -- Registration maintains stable ordering; candidate scans reuse it without sorting.
     for _, name in ipairs(API.GetAdapterNames()) do
         local adapter = API.adapters[name]
-        if adapter.match(worker.inst, target) then
+        if worker:IsFeatureEnabled(M.WorkFeature(target, "adapter:" .. name))
+            and adapter.match(worker.inst, target) then
             return "adapter:" .. name, adapter.action(worker.inst, target)
         end
     end
@@ -103,6 +118,14 @@ function M.IsFarmWork(target, kind)
         target:HasTag("farm_plant") or target:HasTag("medal_fruit_tree")
         or target.components.crop ~= nil or target.components.perennialcrop ~= nil
         or target.components.perennialcrop2 ~= nil)
+end
+
+function M.WorkFeature(target, kind)
+    if kind == "pickup" or kind == "store" then return nil end
+    if kind == "hammer" then return "hammer_giants" end
+    local adapter = kind ~= nil and API.adapters[kind:match("^adapter:(.+)$")] or nil
+    return adapter ~= nil and adapter.feature
+        or (M.IsFarmWork(target, kind) and "harvest_crops" or "pick_plants")
 end
 
 function M.GetWorkEntities(worker)
@@ -246,6 +269,18 @@ function M.HasHarvestDestination(worker, target, kind)
                     end
                 end
             end
+        end
+    end
+    return false
+end
+
+function M.HasFarmWork(worker, entities)
+    -- Query feature eligibility without the batch-phase guard in CanHarvest.
+    -- A newly enabled adapter can resume draining before it starts harvesting.
+    for _, target in ipairs(entities or M.GetWorkEntities(worker)) do
+        if M.IsAvailable(worker, target) and not worker:IsCoolingDown(target) then
+            local kind, action = M.Kind(worker, target)
+            if kind ~= nil and action ~= nil and M.IsFarmWork(target, kind) then return true end
         end
     end
     return false
